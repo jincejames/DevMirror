@@ -1,0 +1,108 @@
+name: "Databricks Lakehouse Buildout"
+description: "Build data lakehouse solutions on Databricks with medallion architecture (Bronze → Silver → Gold)"
+version: "1.0.0"
+domain: "software"
+
+# Workflow customization
+workflow:
+  phases:
+    - name: "research"
+      description: "Research technologies and best practices on lakehouse architecture"
+    - name: "design"
+      description: "Define architecture and contracts"
+    - name: "implement"
+      description: "Write code following TDD"
+    - name: "test"
+      description: "Validate implementation"
+    - name: "review"
+      description: "Code review and quality checks"
+
+# Expected artifacts
+artifacts:
+  required:
+    - spec.md
+    - plan.md
+    - tasks.md
+  optional:
+    - data-model.md
+    - contracts/
+    - quickstart.md
+    - research.md
+    - checklists/
+
+# Path conventions for this mission
+paths:
+  workspace: "src/"
+  tests: "tests/"
+  deliverables: "pipelines/"
+  documentation: "docs/"
+
+# Validation rules
+validation:
+  checks:
+    - git_clean
+    - all_tests_pass
+    - kanban_complete
+    - no_clarification_markers
+  custom_validators: true
+
+# MCP tools recommended for this mission
+mcp_tools:
+  required:
+    - filesystem
+    - git
+  recommended:
+    - code-search
+    - test-runner
+    - web-fetch
+  optional:
+    - databricks-cli
+    - docker
+
+# Agent personality/instructions
+agent_context: |
+  You are a Databricks expert specializing in lakehouse architecture.
+
+  **Documentation Source**: Always fetch latest Databricks best practices from:
+  https://docs.databricks.com/llms.txt
+
+  **Core Principles (7 Lakehouse Principles)**:
+  1. Bronze-First Data Landing - Raw copy, no transformations
+  2. Layer Separation and Progression - Bronze → Silver → Gold
+  3. Data Quality Gates (NON-NEGOTIABLE) - Validation before Gold
+  4. Incremental Ingestion Strategy - No full pulls in production
+  5. CDC and Historization - Type-2 SCD in Silver
+  6. Optimization and Compaction - Z-ordering, statistics
+  7. View Abstraction Layer - Customers access views, not tables
+
+  **Before asking questions or making recommendations**:
+  - Fetch relevant docs from sitemap to ensure current terminology
+  - Auto-correct deprecated feature names with explanation
+  - Include doc links when referencing specific features
+
+# Task metadata fields
+task_metadata:
+  required:
+    - task_id
+    - lane
+    - phase
+    - agent
+  optional:
+    - shell_pid
+    - assignee
+    - estimated_hours
+
+# Command customization
+commands:
+  specify:
+    prompt: "Define lakehouse feature with Bronze-first requirements"
+  plan:
+    prompt: "Design layer-by-layer implementation (Bronze → Silver → Gold)"
+  tasks:
+    prompt: "Break into work packages by lakehouse phase"
+  implement:
+    prompt: "Execute with Databricks best practices from current docs"
+  review:
+    prompt: "Validate against 7 lakehouse principles"
+  accept:
+    prompt: "Verify lakehouse architecture compliance"

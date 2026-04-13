@@ -1,0 +1,13 @@
+{
+    "chat.promptFilesRecommendations": {
+        "lakeforge.constitution": true,
+        "lakeforge.specify": true,
+        "lakeforge.plan": true,
+        "lakeforge.tasks": true,
+        "lakeforge.implement": true
+    },
+    "chat.tools.terminal.autoApprove": {
+        ".lakeforge/scripts/bash/": true,
+        ".lakeforge/scripts/ps/": true
+    }
+}

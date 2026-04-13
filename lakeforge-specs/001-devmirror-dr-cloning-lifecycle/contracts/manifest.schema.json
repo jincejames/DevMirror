@@ -62,7 +62,12 @@
           "items": { "type": "string", "minLength": 1 }
         },
         "total_objects": { "type": "integer", "minimum": 0 },
-        "review_required": { "type": "boolean" }
+        "review_required": { "type": "boolean" },
+        "approved_for_provision": {
+          "type": "boolean",
+          "description": "Set true by a human reviewer when review_required is true and provisioning should proceed",
+          "default": false
+        }
       }
     }
   }

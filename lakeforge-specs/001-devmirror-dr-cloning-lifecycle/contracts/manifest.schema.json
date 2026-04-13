@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devmirror.local/schemas/devmirror-manifest-v1.json",
+  "title": "DevMirror scan_result manifest (v1)",
+  "type": "object",
+  "required": [
+    "scan_result"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "scan_result": {
+      "type": "object",
+      "required": [
+        "dr_id",
+        "scanned_at",
+        "streams_scanned",
+        "objects",
+        "schemas_required",
+        "total_objects",
+        "review_required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "dr_id": { "type": "string" },
+        "scanned_at": { "type": "string", "minLength": 1 },
+        "streams_scanned": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": true,
+            "properties": {
+              "name": { "type": "string" },
+              "workflow_id": { "type": "string" },
+              "tasks": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["fqn", "type", "access_mode"],
+            "additionalProperties": true,
+            "properties": {
+              "fqn": { "type": "string", "minLength": 1 },
+              "type": { "type": "string", "enum": ["table", "view", "schema"] },
+              "format": { "type": "string" },
+              "access_mode": {
+                "type": "string",
+                "enum": ["READ_ONLY", "READ_WRITE", "WRITE_ONLY"]
+              },
+              "estimated_size_gb": { "type": "number" }
+            }
+          }
+        },
+        "schemas_required": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "total_objects": { "type": "integer", "minimum": 0 },
+        "review_required": { "type": "boolean" }
+      }
+    }
+  }
+}

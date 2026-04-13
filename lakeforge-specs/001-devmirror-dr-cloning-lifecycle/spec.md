@@ -9,11 +9,11 @@
 
 ### User Story 1 - Request isolated dev data from production streams (Priority: P1)
 
-A platform operator or lead developer submits a development request that names one or more production data pipelines (streams), optional extra data objects, who needs access, how long the request lasts, and whether a separate QA replica space is required. The system discovers what production tables and views those streams depend on, produces a reviewable inventory with read/write semantics, and—after approval—provisions isolated developer and optional QA namespaces with replicas or governed references, plus access for the named people. The request is recorded as active with a clear status.
+A platform operator or lead developer submits a development request that names one or more production data pipelines (streams), optional extra data objects, who needs access, how long the request lasts, and whether a separate QA replica space is required. The system discovers what production tables and views those streams depend on, produces a reviewable inventory with read/write semantics, and---after approval---provisions isolated developer and optional QA namespaces with replicas or governed references, plus access for the named people. The request is recorded as active with a clear status.
 
 **Why this priority**: Without discovery, review, and first-time provisioning, no developer can safely work against production-shaped data in isolation.
 
-**Independent Test**: Submit a minimal request for a known stream, complete review, run provisioning, and confirm an assigned developer can query assigned replica objects while unrelated developers cannot access that request’s namespaces.
+**Independent Test**: Submit a minimal request for a known stream, complete review, run provisioning, and confirm an assigned developer can query assigned replica objects while unrelated developers cannot access that request's namespaces.
 
 **Acceptance Scenarios**:
 
@@ -33,7 +33,7 @@ An assigned developer refreshes data for an active request to match either the l
 
 **Acceptance Scenarios**:
 
-1. **Given** an active, unexpired request, **When** refresh is requested for “latest”, **Then** read-only references and replica objects reflect the latest authorized production state per policy, and the request records when refresh completed.
+1. **Given** an active, unexpired request, **When** refresh is requested for "latest", **Then** read-only references and replica objects reflect the latest authorized production state per policy, and the request records when refresh completed.
 2. **Given** an active request and a snapshot choice that is still within retention for every in-scope object, **When** refresh runs, **Then** replicas align to that snapshot and failures per object are recorded without silently succeeding.
 3. **Given** a snapshot choice outside retention for at least one object, **When** refresh is validated, **Then** the operation fails up front with guidance on the earliest usable snapshot information available for that object.
 
@@ -50,7 +50,7 @@ A lead adjusts an active request: add or remove streams or objects, add or remov
 **Acceptance Scenarios**:
 
 1. **Given** an active request, **When** new streams are added, **Then** discovery merges new dependencies into the inventory, provisions only net-new objects, and preserves existing replicas unless superseded by policy.
-2. **Given** an active request, **When** users are added or removed, **Then** access to that request’s namespaces matches the new list without affecting unrelated requests.
+2. **Given** an active request, **When** users are added or removed, **Then** access to that request's namespaces matches the new list without affecting unrelated requests.
 3. **Given** an active request, **When** the end date is moved later within policy limits, **Then** notifications and cleanup schedules recompute from the new date.
 
 ---
@@ -91,8 +91,8 @@ Operators and developers can see request status, last refresh, inventory, and a 
 - Stream lineage is incomplete or missing for dynamic references: inventory marks review-required; provisioning is blocked until a reviewer approves or augments the list.
 - Object provisioning fails for one of many objects: other objects continue where policy allows; failed lines are visible with reasons; overall request remains usable with warnings when policy permits.
 - Schema prefix collision with another active request: validation surfaces the conflict and which request holds the prefix; resolution is explicit (no silent overwrite).
-- Production object removed while a read-through reference still exists: runtime queries may fail; the system does not promise automatic healing—re-scan and refresh are the supported path.
-- Cleanup partially fails: request stays in a retryable cleanup state; next scheduled pass continues; no silent “cleaned” status.
+- Production object removed while a read-through reference still exists: runtime queries may fail; the system does not promise automatic healing---re-scan and refresh are the supported path.
+- Cleanup partially fails: request stays in a retryable cleanup state; next scheduled pass continues; no silent "cleaned" status.
 - Re-submitting the same request identifier: treated as an update to the same logical request per configuration rules, not a duplicate parallel environment unless product policy says otherwise.
 
 ## Requirements *(mandatory)*
@@ -101,10 +101,10 @@ Operators and developers can see request status, last refresh, inventory, and a 
 
 - **FR-001**: The system MUST accept a structured request definition that includes a unique identifier, one or more production streams, optional additional object names, optional QA space enablement, data snapshot policy (latest, fixed version, or timestamp), assigned people, and a mandatory end date within configurable maximum duration.
 - **FR-002**: The system MUST validate that named streams resolve to known production orchestration definitions before discovery or provisioning proceeds.
-- **FR-003**: The system MUST discover upstream and downstream data objects associated with each stream using authorized platform lineage metadata, enrich with optional curated mappings where configured, and classify each object’s relationship to the stream as read-only, read-write, or write-only.
+- **FR-003**: The system MUST discover upstream and downstream data objects associated with each stream using authorized platform lineage metadata, enrich with optional curated mappings where configured, and classify each object's relationship to the stream as read-only, read-write, or write-only.
 - **FR-004**: The system MUST produce a human-reviewable inventory before first provisioning, capturing additions, removals, and strategy overrides from reviewers, and MUST block first provisioning until approval is recorded when review is required.
 - **FR-005**: The system MUST provision isolated namespaces per request using consistent naming rules for development and optional QA, and MUST create replicas or governed references according to approved strategies (read-through, full independent copy, shared-file metadata copy, or empty schema-compatible shell) including optional point-in-time behavior aligned to the snapshot policy.
-- **FR-006**: The system MUST grant each assigned person access only to namespaces and objects belonging to that request’s development or QA space, and MUST never grant write access to authoritative production objects as part of this product’s access model.
+- **FR-006**: The system MUST grant each assigned person access only to namespaces and objects belonging to that request's development or QA space, and MUST never grant write access to authoritative production objects as part of this product's access model.
 - **FR-007**: The system MUST record the full submitted definition, per-object mapping from production to isolated targets, snapshot policy, provision timestamps, refresh timestamps, and lifecycle status in a durable control store.
 - **FR-008**: The system MUST support refresh of in-scope objects to latest or an approved snapshot, with per-object success or failure reporting and control-store updates.
 - **FR-009**: The system MUST support post-provisioning modifications (streams, objects, schemas, people, end date) with incremental apply, partial-success semantics where explicitly allowed, and audit entries per change batch.
@@ -128,9 +128,9 @@ Operators and developers can see request status, last refresh, inventory, and a 
 
 - **SC-001**: For a reviewed and approved first-time request, at least 95% of inventory lines complete provisioning on the first attempt under nominal platform health, with every line showing either success or a recorded failure reason within the same run.
 - **SC-002**: 100% of active requests receive a pre-expiry notification at or before the configured lead time, unless the request is cancelled or cleaned up earlier.
-- **SC-003**: For requests past end date, automated cleanup reaches a terminal “fully cleaned” or explicit “cleanup in progress awaiting retry” state within 24 hours under nominal platform health, with zero retained access grants tied to that request’s isolated namespaces once fully cleaned.
+- **SC-003**: For requests past end date, automated cleanup reaches a terminal "fully cleaned" or explicit "cleanup in progress awaiting retry" state within 24 hours under nominal platform health, with zero retained access grants tied to that request's isolated namespaces once fully cleaned.
 - **SC-004**: 100% of user-visible state changes (submit, approve, provision completion, refresh, modification batch, notification sent, cleanup start/end) have a corresponding audit event retrievable by request identifier.
-- **SC-005**: In access verification tests, zero unauthorized principals can read or write another request’s isolated namespaces without a policy-explicit cross-reference (default remains deny across requests).
+- **SC-005**: In access verification tests, zero unauthorized principals can read or write another request's isolated namespaces without a policy-explicit cross-reference (default remains deny across requests).
 
 ## Assumptions
 

@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devmirror.local/schemas/devmirror-config-v1.json",
+  "title": "DevMirror development_request config (v1)",
+  "type": "object",
+  "required": ["version", "development_request"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "development_request": {
+      "type": "object",
+      "required": [
+        "dr_id",
+        "streams",
+        "environments",
+        "data_revision",
+        "access",
+        "lifecycle"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "dr_id": {
+          "type": "string",
+          "pattern": "^DR-[0-9]+$"
+        },
+        "description": { "type": "string" },
+        "streams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "additional_objects": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "environments": {
+          "type": "object",
+          "required": ["dev"],
+          "additionalProperties": false,
+          "properties": {
+            "dev": {
+              "type": "object",
+              "required": ["enabled"],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "const": true }
+              }
+            },
+            "qa": {
+              "type": "object",
+              "required": ["enabled"],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        "data_revision": {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["latest", "version", "timestamp"]
+            },
+            "version": { "type": "integer", "minimum": 0 },
+            "timestamp": { "type": "string", "minLength": 1 }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "mode": { "const": "version" } } },
+              "then": { "required": ["version"] }
+            },
+            {
+              "if": { "properties": { "mode": { "const": "timestamp" } } },
+              "then": { "required": ["timestamp"] }
+            }
+          ]
+        },
+        "access": {
+          "type": "object",
+          "required": ["developers"],
+          "additionalProperties": false,
+          "properties": {
+            "developers": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "qa_users": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "required": ["expiration_date"],
+          "additionalProperties": false,
+          "properties": {
+            "expiration_date": {
+              "type": "string",
+              "format": "date",
+              "description": "ISO 8601 date"
+            },
+            "notification_days_before": { "type": "integer", "minimum": 0 },
+            "notification_recipients": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

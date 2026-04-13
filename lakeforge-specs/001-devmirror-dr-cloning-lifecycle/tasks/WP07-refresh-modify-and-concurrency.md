@@ -1,27 +1,28 @@
 ---
-work_package_id: WP07
-title: Refresh, modify, and concurrency
-lane: planned
-dependencies: []
+work_package_id: "WP07"
+title: "Refresh, modify, and concurrency"
+phase: "Phase 4 - Change management"
+lane: "planned"
+dependencies:
+  - "WP05"
 subtasks:
-- T032
-- T033
-- T034
-- T035
-- T036
-- T037
-phase: Phase 4 - Change management
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T032"
+  - "T033"
+  - "T034"
+  - "T035"
+  - "T036"
+  - "T037"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP07 - Refresh, modify, and concurrency

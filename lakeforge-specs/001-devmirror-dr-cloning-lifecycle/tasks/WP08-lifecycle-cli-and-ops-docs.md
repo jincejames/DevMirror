@@ -1,27 +1,30 @@
 ---
-work_package_id: WP08
-title: Lifecycle, remaining CLI, and ops docs
-lane: planned
-dependencies: []
+work_package_id: "WP08"
+title: "Lifecycle, remaining CLI, and ops docs"
+phase: "Phase 5 - Lifecycle and operations"
+lane: "planned"
+dependencies:
+  - "WP03"
+  - "WP05"
+  - "WP07"
 subtasks:
-- T038
-- T039
-- T040
-- T041
-- T042
-- T043
-phase: Phase 5 - Lifecycle and operations
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T038"
+  - "T039"
+  - "T040"
+  - "T041"
+  - "T042"
+  - "T043"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP08 - Lifecycle, remaining CLI, and ops docs

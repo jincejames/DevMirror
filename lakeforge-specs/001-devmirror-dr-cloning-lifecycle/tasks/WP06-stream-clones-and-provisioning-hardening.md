@@ -1,26 +1,27 @@
 ---
-work_package_id: WP06
-title: Stream clones and provisioning hardening
-lane: planned
-dependencies: []
+work_package_id: "WP06"
+title: "Stream clones and provisioning hardening"
+phase: "Phase 3 - Provision"
+lane: "planned"
+dependencies:
+  - "WP05"
 subtasks:
-- T027
-- T028
-- T029
-- T030
-- T031
-phase: Phase 3 - Provision
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T027"
+  - "T028"
+  - "T029"
+  - "T030"
+  - "T031"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP06 - Stream clones and provisioning hardening

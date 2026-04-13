@@ -1,26 +1,27 @@
 ---
-work_package_id: WP03
-title: Control store DDL and persistence
-lane: planned
-dependencies: []
+work_package_id: "WP03"
+title: "Control store DDL and persistence"
+phase: "Phase 1 - Foundation"
+lane: "planned"
+dependencies:
+  - "WP02"
 subtasks:
-- T011
-- T012
-- T013
-- T014
-- T015
-phase: Phase 1 - Foundation
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T011"
+  - "T012"
+  - "T013"
+  - "T014"
+  - "T015"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP03 - Control store DDL and persistence

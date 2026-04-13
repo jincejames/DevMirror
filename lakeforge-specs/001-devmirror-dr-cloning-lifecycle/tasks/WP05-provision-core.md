@@ -1,26 +1,28 @@
 ---
-work_package_id: WP05
-title: Provision core
-lane: planned
-dependencies: []
+work_package_id: "WP05"
+title: "Provision core"
+phase: "Phase 3 - Provision"
+lane: "planned"
+dependencies:
+  - "WP03"
+  - "WP04"
 subtasks:
-- T022
-- T023
-- T024
-- T025
-- T026
-phase: Phase 3 - Provision
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T022"
+  - "T023"
+  - "T024"
+  - "T025"
+  - "T026"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP05 - Provision core

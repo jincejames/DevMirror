@@ -1,26 +1,27 @@
 ---
-work_package_id: WP02
-title: Runtime utilities and offline tests
-lane: planned
-dependencies: []
+work_package_id: "WP02"
+title: "Runtime utilities and offline tests"
+phase: "Phase 1 - Foundation"
+lane: "planned"
+dependencies:
+  - "WP01"
 subtasks:
-- T006
-- T007
-- T008
-- T009
-- T010
-phase: Phase 1 - Foundation
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T006"
+  - "T007"
+  - "T008"
+  - "T009"
+  - "T010"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP02 - Runtime utilities and offline tests

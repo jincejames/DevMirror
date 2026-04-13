@@ -1,27 +1,28 @@
 ---
-work_package_id: WP04
-title: Scan pipeline and manifest CLI
-lane: planned
-dependencies: []
+work_package_id: "WP04"
+title: "Scan pipeline and manifest CLI"
+phase: "Phase 2 - Discovery"
+lane: "planned"
+dependencies:
+  - "WP02"
 subtasks:
-- T016
-- T017
-- T018
-- T019
-- T020
-- T021
-phase: Phase 2 - Discovery
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T016"
+  - "T017"
+  - "T018"
+  - "T019"
+  - "T020"
+  - "T021"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-04-13T20:00:00Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /tasks
+  - timestamp: "2026-04-13T20:00:00Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /tasks"
 ---
 
 # Work Package Prompt: WP04 - Scan pipeline and manifest CLI

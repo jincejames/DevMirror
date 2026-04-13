@@ -1,4 +1,8 @@
 {
+  "feature_number": "001",
+  "slug": "001-devmirror-dr-cloning-lifecycle",
+  "friendly_name": "DevMirror DR cloning lifecycle",
   "mission": "software-dev",
-  "feature_slug": "001-devmirror-dr-cloning-lifecycle"
+  "source_description": "@SPECIFICATION.md (1-693)",
+  "created_at": "2026-04-13T12:00:00Z"
 }

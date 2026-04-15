@@ -18,6 +18,7 @@ from devmirror.utils.db_client import DbClient
 
 from .repository import ConfigRepository
 from .router import router
+from .router_stage2 import router_stage2
 from .tasks import TaskTracker
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ app.add_middleware(
 
 # API routes (must be registered BEFORE the static file mount)
 app.include_router(router, prefix="/api")
+app.include_router(router_stage2, prefix="/api")
 
 
 @app.get("/api/health", operation_id="healthCheck")

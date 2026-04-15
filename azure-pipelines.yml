@@ -1,0 +1,342 @@
+# ---------------------------------------------------------------------------
+# Azure DevOps CI/CD Pipeline for DevMirror
+# ---------------------------------------------------------------------------
+# CI: Triggered on PRs and pushes to main. Matrix build across Python 3.11-3.13.
+# CD: Triggered on main only after CI passes. Deploys via Databricks Asset Bundles.
+# ---------------------------------------------------------------------------
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+      - "feature/*"
+      - "bugfix/*"
+
+variables:
+  - group: devmirror-variables                    # Contains DATABRICKS_HOST, DATABRICKS_TOKEN, DEVMIRROR_WAREHOUSE_ID
+  - name: pythonPackage
+    value: devmirror
+  - name: pipCacheDir
+    value: $(Pipeline.Workspace)/.pip
+
+# ---------------------------------------------------------------------------
+# CI stages
+# ---------------------------------------------------------------------------
+stages:
+  # =========================================================================
+  # Stage 1: Lint
+  # =========================================================================
+  - stage: Lint
+    displayName: "Lint"
+    jobs:
+      - job: RuffLint
+        displayName: "Ruff lint check"
+        pool:
+          vmImage: "ubuntu-latest"
+        strategy:
+          matrix:
+            Python311:
+              pythonVersion: "3.11"
+            Python312:
+              pythonVersion: "3.12"
+            Python313:
+              pythonVersion: "3.13"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python $(pythonVersion)"
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - task: Cache@2
+            displayName: "Cache pip packages"
+            inputs:
+              key: 'pip | "$(Agent.OS)" | "$(pythonVersion)" | pyproject.toml'
+              restoreKeys: |
+                pip | "$(Agent.OS)" | "$(pythonVersion)"
+              path: $(pipCacheDir)
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install --cache-dir $(pipCacheDir) -e ".[dev]"
+            displayName: "Install dependencies"
+
+          - script: |
+              python -m ruff check devmirror/ tests/ --output-format=github
+            displayName: "Run ruff linter"
+
+  # =========================================================================
+  # Stage 2: Test (depends on Lint passing)
+  # =========================================================================
+  - stage: Test
+    displayName: "Unit Tests"
+    dependsOn: Lint
+    condition: succeeded()
+    jobs:
+      - job: UnitTests
+        displayName: "pytest unit tests"
+        pool:
+          vmImage: "ubuntu-latest"
+        strategy:
+          matrix:
+            Python311:
+              pythonVersion: "3.11"
+            Python312:
+              pythonVersion: "3.12"
+            Python313:
+              pythonVersion: "3.13"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python $(pythonVersion)"
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - task: Cache@2
+            displayName: "Cache pip packages"
+            inputs:
+              key: 'pip | "$(Agent.OS)" | "$(pythonVersion)" | pyproject.toml'
+              restoreKeys: |
+                pip | "$(Agent.OS)" | "$(pythonVersion)"
+              path: $(pipCacheDir)
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install --cache-dir $(pipCacheDir) -e ".[dev]"
+            displayName: "Install dependencies"
+
+          - script: |
+              python -m pytest tests/unit/ \
+                -v --tb=short \
+                --cov=$(pythonPackage) \
+                --cov-report=xml:$(Build.SourcesDirectory)/coverage.xml \
+                --junitxml=$(Build.SourcesDirectory)/test-results.xml
+            displayName: "Run unit tests with coverage"
+            env:
+              DEVMIRROR_WAREHOUSE_ID: $(DEVMIRROR_WAREHOUSE_ID)
+
+          - task: PublishTestResults@2
+            displayName: "Publish test results"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "$(Build.SourcesDirectory)/test-results.xml"
+              testRunTitle: "Unit Tests - Python $(pythonVersion)"
+              mergeTestResults: true
+
+          - task: PublishCodeCoverageResults@2
+            displayName: "Publish code coverage"
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: "$(Build.SourcesDirectory)/coverage.xml"
+
+  # =========================================================================
+  # Stage 3: Security scan
+  # =========================================================================
+  - stage: SecurityScan
+    displayName: "Security Scan"
+    dependsOn: Lint
+    condition: succeeded()
+    jobs:
+      - job: PipAudit
+        displayName: "pip-audit vulnerability scan"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python 3.12"
+            inputs:
+              versionSpec: "3.12"
+
+          - task: Cache@2
+            displayName: "Cache pip packages"
+            inputs:
+              key: 'pip | "$(Agent.OS)" | "3.12" | pyproject.toml'
+              restoreKeys: |
+                pip | "$(Agent.OS)" | "3.12"
+              path: $(pipCacheDir)
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install --cache-dir $(pipCacheDir) -e ".[dev]"
+              pip install pip-audit
+            displayName: "Install dependencies + pip-audit"
+
+          - script: |
+              python -m pip_audit --strict --desc
+            displayName: "Run pip-audit"
+
+  # =========================================================================
+  # Stage 4: Build wheel artifact (CI artifact for validation)
+  # =========================================================================
+  - stage: BuildWheel
+    displayName: "Build Wheel"
+    dependsOn:
+      - Test
+      - SecurityScan
+    condition: succeeded()
+    jobs:
+      - job: Build
+        displayName: "Build Python wheel"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python 3.12"
+            inputs:
+              versionSpec: "3.12"
+
+          - script: |
+              python -m pip install --upgrade pip build
+              python -m build
+            displayName: "Build sdist and wheel"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish wheel artifact"
+            inputs:
+              targetPath: "$(Build.SourcesDirectory)/dist"
+              artifactName: "python-package"
+
+  # =========================================================================
+  # CD stages -- only on main branch
+  # =========================================================================
+
+  # =========================================================================
+  # Stage 5: Package for deployment
+  # =========================================================================
+  - stage: Package
+    displayName: "Package for Deployment"
+    dependsOn: BuildWheel
+    condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+    jobs:
+      - job: PackageWheel
+        displayName: "Package deployment artifact"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python 3.12"
+            inputs:
+              versionSpec: "3.12"
+
+          - script: |
+              python -m pip install --upgrade pip build
+              python -m build
+            displayName: "Build wheel for deployment"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish deployment artifact"
+            inputs:
+              targetPath: "$(Build.SourcesDirectory)/dist"
+              artifactName: "deploy-package"
+
+  # =========================================================================
+  # Stage 6: Deploy to Dev
+  # =========================================================================
+  - stage: DeployDev
+    displayName: "Deploy to Dev"
+    dependsOn: Package
+    condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+    jobs:
+      - deployment: DeployDevEnvironment
+        displayName: "Deploy to Databricks Dev"
+        pool:
+          vmImage: "ubuntu-latest"
+        environment: "devmirror-dev"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  displayName: "Use Python 3.12"
+                  inputs:
+                    versionSpec: "3.12"
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: "Download deployment artifact"
+                  inputs:
+                    artifactName: "deploy-package"
+                    targetPath: "$(Build.SourcesDirectory)/dist"
+
+                - script: |
+                    curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                  displayName: "Install Databricks CLI"
+
+                - script: |
+                    python -m pip install --upgrade pip build
+                    python -m build
+                  displayName: "Build wheel for bundle"
+
+                - script: |
+                    databricks bundle validate --target dev
+                  displayName: "Validate Databricks bundle (dev)"
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                - script: |
+                    databricks bundle deploy --target dev
+                  displayName: "Deploy bundle to dev"
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+  # =========================================================================
+  # Stage 7: Deploy to Prod (manual approval gate)
+  # =========================================================================
+  - stage: DeployProd
+    displayName: "Deploy to Prod"
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+    jobs:
+      - deployment: DeployProdEnvironment
+        displayName: "Deploy to Databricks Prod"
+        pool:
+          vmImage: "ubuntu-latest"
+        # The 'devmirror-prod' environment must have approval checks configured
+        # in Azure DevOps (Settings > Environments > devmirror-prod > Approvals and checks)
+        environment: "devmirror-prod"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  displayName: "Use Python 3.12"
+                  inputs:
+                    versionSpec: "3.12"
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: "Download deployment artifact"
+                  inputs:
+                    artifactName: "deploy-package"
+                    targetPath: "$(Build.SourcesDirectory)/dist"
+
+                - script: |
+                    curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                  displayName: "Install Databricks CLI"
+
+                - script: |
+                    python -m pip install --upgrade pip build
+                    python -m build
+                  displayName: "Build wheel for bundle"
+
+                - script: |
+                    databricks bundle validate --target prod
+                  displayName: "Validate Databricks bundle (prod)"
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                - script: |
+                    databricks bundle deploy --target prod
+                  displayName: "Deploy bundle to prod"
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)

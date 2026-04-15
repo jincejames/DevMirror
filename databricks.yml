@@ -1,0 +1,69 @@
+bundle:
+  name: devmirror
+
+variables:
+  warehouse_id:
+    description: SQL warehouse ID (optional, only needed for remote execution without a cluster)
+  node_type_id:
+    description: Instance type for job clusters (e.g. i3.xlarge, Standard_DS3_v2)
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+
+artifacts:
+  devmirror_wheel:
+    type: whl
+    build: pip wheel --no-deps --wheel-dir dist .
+    path: .
+
+resources:
+  jobs:
+    devmirror-lifecycle:
+      name: devmirror-lifecycle
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: UTC
+      job_clusters:
+        - job_cluster_key: lifecycle_cluster
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            num_workers: 0
+            node_type_id: ${var.node_type_id}
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+      tasks:
+        - task_key: notify
+          job_cluster_key: lifecycle_cluster
+          python_wheel_task:
+            package_name: devmirror
+            entry_point: devmirror-notify
+          libraries:
+            - whl: ./dist/*.whl
+
+        - task_key: cleanup
+          depends_on:
+            - task_key: notify
+          job_cluster_key: lifecycle_cluster
+          python_wheel_task:
+            package_name: devmirror
+            entry_point: devmirror-cleanup
+          libraries:
+            - whl: ./dist/*.whl
+
+        - task_key: audit_purge
+          depends_on:
+            - task_key: cleanup
+          job_cluster_key: lifecycle_cluster
+          python_wheel_task:
+            package_name: devmirror
+            entry_point: devmirror-audit-purge
+          libraries:
+            - whl: ./dist/*.whl

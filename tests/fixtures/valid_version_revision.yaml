@@ -1,0 +1,17 @@
+version: "1.0"
+
+development_request:
+  dr_id: "DR-42"
+  streams:
+    - name: "pipeline_alpha"
+  environments:
+    dev:
+      enabled: true
+  data_revision:
+    mode: "version"
+    version: 55
+  access:
+    developers:
+      - "eng@company.com"
+  lifecycle:
+    expiration_date: "2099-01-01"

@@ -1,0 +1,16 @@
+# Added by Lakeforge CLI (auto-managed)
+.claude/
+.codex/
+.opencode/
+.windsurf/
+.gemini/
+.cursor/
+.qwen/
+.kilocode/
+.augment/
+.roo/
+.amazonq/
+.github/copilot/
+.lakeforge/.dashboard
+
+.databricks

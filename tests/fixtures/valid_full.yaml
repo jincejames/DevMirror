@@ -1,0 +1,31 @@
+version: "1.0"
+
+development_request:
+  dr_id: "DR-9999"
+  description: "Full-featured config for testing"
+  streams:
+    - name: "customer_churn_daily"
+    - name: "customer_segmentation_weekly"
+  additional_objects:
+    - "prod_analytics.marketing.campaign_dim"
+    - "prod_analytics.shared.date_dim"
+  environments:
+    dev:
+      enabled: true
+    qa:
+      enabled: true
+  data_revision:
+    mode: "timestamp"
+    timestamp: "2026-04-01T00:00:00Z"
+  access:
+    developers:
+      - "dev.user1@company.com"
+      - "dev.user2@company.com"
+    qa_users:
+      - "qa.lead@company.com"
+  lifecycle:
+    expiration_date: "2099-06-15"
+    notification_days_before: 14
+    notification_recipients:
+      - "dev.user1@company.com"
+      - "team-lead@company.com"

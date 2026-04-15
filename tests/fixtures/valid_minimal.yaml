@@ -1,0 +1,16 @@
+version: "1.0"
+
+development_request:
+  dr_id: "DR-1042"
+  streams:
+    - name: "customer_churn_daily"
+  environments:
+    dev:
+      enabled: true
+  data_revision:
+    mode: "latest"
+  access:
+    developers:
+      - "dev@company.com"
+  lifecycle:
+    expiration_date: "2099-12-31"

@@ -1,0 +1,9 @@
+command:
+  - uvicorn
+  - backend.main:app
+  - --host=0.0.0.0
+  - --port=8000
+env:
+  - name: DEVMIRROR_WAREHOUSE_ID
+  - name: DEVMIRROR_CONTROL_CATALOG
+  - name: DEVMIRROR_CONTROL_SCHEMA

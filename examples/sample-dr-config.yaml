@@ -1,0 +1,33 @@
+version: "1.0"
+
+development_request:
+  dr_id: "DR-1001"
+  description: "Example: clone a pipeline's objects to dev"
+
+  streams:
+    - name: "your-pipeline-or-job-name"
+
+  environments:
+    dev:
+      enabled: true
+    # qa:
+    #   enabled: true
+
+  data_revision:
+    mode: "latest"
+    # mode: "version"
+    # version: 42
+    # mode: "timestamp"
+    # timestamp: "2026-04-01T00:00:00Z"
+
+  access:
+    developers:
+      - "your.email@company.com"
+    # qa_users:
+    #   - "qa.user@company.com"
+
+  lifecycle:
+    expiration_date: "2026-07-14"
+    notification_days_before: 7
+    notification_recipients:
+      - "your.email@company.com"

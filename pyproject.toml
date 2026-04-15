@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "devmirror"
+version = "0.1.0"
+description = "Automates cloning and lifecycle management of production Unity Catalog objects into isolated development environments."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11,<3.14"
+authors = [{ name = "DevMirror Team" }]
+
+dependencies = [
+    "pydantic>=2.0,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "databricks-sdk>=0.38.0,<1.0",
+    "click>=8.1,<9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-cov>=5.0,<6.0",
+    "ruff>=0.7.0,<1.0",
+]
+
+[project.scripts]
+devmirror = "devmirror.cli:main"
+devmirror-notify = "devmirror.jobs:run_notifications"
+devmirror-cleanup = "devmirror.jobs:run_cleanup"
+devmirror-audit-purge = "devmirror.jobs:run_audit_purge"
+
+[tool.hatch.build.targets.wheel]
+packages = ["devmirror"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["devmirror", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",  # line length handled by formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["devmirror"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"

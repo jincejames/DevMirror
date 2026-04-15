@@ -176,39 +176,6 @@ Long-running clones: log statement ids; support warehouse timeouts with retry po
 
 ---
 
-## Work Package WP06: Stream clones, safety gates, and provisioning hardening (Priority: P1)
-
-**Goal**: Clone or rewrite workflows and pipelines for dev use, enforce review and prefix collision rules against control metadata, complete access edge cases for prod-backed views.  
-**Independent Test**: Adding a second DR with colliding prefix is rejected with actionable message naming incumbent `dr_id`; `review_required` manifest cannot provision unless reviewer override flag is present in manifest metadata (define explicit field during implementation and document in contracts).  
-**Prompt**: `lakeforge-specs/001-devmirror-dr-cloning-lifecycle/tasks/WP06-stream-clones-and-provisioning-hardening.md`  
-**Estimated prompt size**: ~400 lines
-
-### Included Subtasks
-
-- [ ] T027 Implement `devmirror/provision/stream_cloner.py` first vertical slice: clone job with adjusted name and parameter documents for catalog mapping; pipeline path may stub with clear `NotImplementedError` until second pass if timeboxed, but interface must exist
-- [ ] T028 Extend access phase so view strategy includes required `GRANT SELECT` on underlying prod objects for principals who will hit views, per `SPECIFICATION.md` provisioning flow step 7 language
-- [ ] T029 Implement `--auto-approve` path: internal scan -> manifest approval metadata default for non-`review_required` only; if `review_required`, require explicit manifest field `approved_for_provision: true` (add to `contracts/manifest.schema.json` in same WP)
-- [ ] T030 Implement prefix collision checks querying active DRs from control store before provisioning writes
-- [ ] T031 Add structured logging context (`dr_id`, `object`, `phase`) across provision runner for operator triage
-
-### Implementation Notes
-
-Coordinate manifest schema change with `contracts/manifest.schema.json` and regenerate example manifests in `quickstart.md` if needed.
-
-### Parallel Opportunities
-
-T031 can be applied incrementally while T027-T030 land.
-
-### Dependencies
-
-Depends on **WP05**.
-
-### Risks and mitigations
-
-Job clone complexity: keep first slice minimal (name suffix, single-job clone); document unsupported pipeline features for follow-up if not v1-complete.
-
----
-
 ## Work Package WP07: Refresh, modify, concurrency helper (Priority: P2)
 
 **Goal**: Refresh replicas to latest or revision; apply incremental modifications; share bounded parallelism helper used by provision and refresh.  

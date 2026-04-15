@@ -431,3 +431,360 @@ class TestUpdateProvisionedConfig:
         data = resp.json()
         assert data["dr_id"] == "DR-1042"
         assert data["status"] == "provisioned"
+
+
+# ---- US-26: Ownership filtering on stage2 endpoints ----
+
+
+class TestOwnershipStage2:
+    """US-26: ownership / 403 checks on stage2 endpoints.
+
+    ``user_client`` authenticates as ``testuser@example.com`` with role ``"user"``.
+    ``client`` authenticates as ``testuser@example.com`` with role ``"admin"``.
+    """
+
+    # -- POST /api/configs/{dr_id}/scan  (non-owner => 403) ----------------
+
+    def test_scan_config_non_owner_403(self, user_client, mock_db):
+        """Non-owner user gets 403 when scanning another user's config."""
+        mock_db.sql.return_value = [make_db_row(created_by="other@example.com")]
+        resp = user_client.post("/api/configs/DR-1042/scan")
+        assert resp.status_code == 403
+
+    # -- GET /api/configs/{dr_id}/manifest (non-owner => 403) --------------
+
+    def test_get_manifest_non_owner_403(self, user_client, mock_db):
+        """Non-owner user gets 403 when reading another user's manifest."""
+        mock_db.sql.return_value = [make_db_row(created_by="other@example.com")]
+        resp = user_client.get("/api/configs/DR-1042/manifest")
+        assert resp.status_code == 403
+
+    # -- PUT /api/configs/{dr_id}/manifest (non-owner => 403) --------------
+
+    def test_update_manifest_non_owner_403(self, user_client, mock_db):
+        """Non-owner user gets 403 when updating another user's manifest."""
+        mock_db.sql.return_value = [make_db_row(created_by="other@example.com")]
+        new_manifest = {"scan_result": {"dr_id": "DR-1042", "objects": []}}
+        resp = user_client.put("/api/configs/DR-1042/manifest", json=new_manifest)
+        assert resp.status_code == 403
+
+    # -- POST /api/configs/{dr_id}/provision (non-owner => 403) ------------
+
+    def test_provision_non_owner_403(self, user_client, mock_db):
+        """Non-owner user gets 403 when provisioning another user's config."""
+        mock_db.sql.return_value = [make_db_row(created_by="other@example.com")]
+        resp = user_client.post("/api/configs/DR-1042/provision")
+        assert resp.status_code == 403
+
+    # -- GET /api/drs/{dr_id}/status (non-owner => 403) --------------------
+
+    @patch(_CONTROL_REPO_PATCHES[0])
+    @patch(_CONTROL_REPO_PATCHES[1])
+    @patch(_CONTROL_REPO_PATCHES[2])
+    def test_dr_status_non_owner_403(self, MockDRRepo, MockObjRepo, MockAuditRepo, user_client, mock_db):
+        """Non-owner user gets 403 when checking DR status owned by another user."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="other@example.com",
+        )
+        resp = user_client.get("/api/drs/DR-1042/status")
+        assert resp.status_code == 403
+
+    # -- GET /api/drs (list: user sees own only) ---------------------------
+
+    @patch("devmirror.control.control_table.DrObjectRepository")
+    @patch("devmirror.control.control_table.DRRepository")
+    def test_list_drs_user_sees_own_only(self, MockDRRepo, MockObjRepo, user_client, mock_db):
+        """Non-admin user only sees DRs they created."""
+        MockDRRepo.return_value.list_active.return_value = [
+            {
+                "dr_id": "DR-1042", "status": "ACTIVE", "description": "Own DR",
+                "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+                "created_by": "testuser@example.com",
+            },
+            {
+                "dr_id": "DR-2000", "status": "ACTIVE", "description": "Other DR",
+                "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+                "created_by": "other@example.com",
+            },
+        ]
+        resp = user_client.get("/api/drs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert len(data["drs"]) == 1
+        assert data["drs"][0]["dr_id"] == "DR-1042"
+
+    @patch("devmirror.control.control_table.DrObjectRepository")
+    @patch("devmirror.control.control_table.DRRepository")
+    def test_list_drs_admin_sees_all(self, MockDRRepo, MockObjRepo, client, mock_db):
+        """Admin user sees all DRs regardless of owner."""
+        MockDRRepo.return_value.list_active.return_value = [
+            {
+                "dr_id": "DR-1042", "status": "ACTIVE", "description": "Own DR",
+                "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+                "created_by": "testuser@example.com",
+            },
+            {
+                "dr_id": "DR-2000", "status": "ACTIVE", "description": "Other DR",
+                "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+                "created_by": "other@example.com",
+            },
+        ]
+        resp = client.get("/api/drs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["drs"]) == 2
+
+    # -- POST /api/drs/{dr_id}/cleanup (non-owner => 403) -----------------
+
+    @patch(_CONTROL_REPO_PATCHES[0])
+    @patch(_CONTROL_REPO_PATCHES[1])
+    @patch(_CONTROL_REPO_PATCHES[2])
+    def test_cleanup_non_owner_403(self, MockDRRepo, MockObjRepo, MockAuditRepo, user_client, mock_db):
+        """Non-owner user gets 403 when cleaning up another user's DR."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="other@example.com",
+        )
+        resp = user_client.post("/api/drs/DR-1042/cleanup")
+        assert resp.status_code == 403
+
+    # -- POST /api/drs/{dr_id}/refresh (non-owner => 403) -----------------
+
+    @patch(_CONTROL_REPO_PATCHES[0])
+    @patch(_CONTROL_REPO_PATCHES[1])
+    @patch(_CONTROL_REPO_PATCHES[2])
+    def test_refresh_non_owner_403(self, MockDRRepo, MockObjRepo, MockAuditRepo, user_client, mock_db):
+        """Non-owner user gets 403 when refreshing another user's DR."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="other@example.com",
+        )
+        resp = user_client.post("/api/drs/DR-1042/refresh", json={"mode": "incremental"})
+        assert resp.status_code == 403
+
+    # -- POST /api/drs/{dr_id}/reprovision (non-owner => 403) -------------
+
+    @patch("devmirror.control.control_table.DRRepository")
+    def test_reprovision_non_owner_403(self, MockDRRepo, user_client, mock_db):
+        """Non-owner user gets 403 when reprovisioning another user's config."""
+        mock_db.sql.return_value = [make_db_row(created_by="other@example.com")]
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="other@example.com",
+        )
+        resp = user_client.post("/api/drs/DR-1042/reprovision")
+        assert resp.status_code == 403
+
+
+# ---- Modify endpoint tests (US-27) ----
+
+# Decorator stacks for modify patches: 4 control repos + modify_dr engine
+_MODIFY_CONTROL_PATCHES = [
+    "devmirror.control.audit.AuditRepository",
+    "devmirror.control.control_table.DrAccessRepository",
+    "devmirror.control.control_table.DrObjectRepository",
+    "devmirror.control.control_table.DRRepository",
+]
+
+
+class TestModifyDr:
+    """Tests for POST /api/drs/{dr_id}/modify (US-27)."""
+
+    @patch("devmirror.modify.modification_engine.modify_dr")
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_success(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        mock_modify, client, mock_db,
+    ):
+        """Admin client modifies a DR successfully."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="testuser@example.com",
+        )
+
+        # Build a realistic modify_dr return value
+        action = MagicMock()
+        action.action = "EXTEND_EXPIRATION"
+        action.detail = "Extended expiration to 2026-07-01"
+        result = MagicMock()
+        result.audit_status = "SUCCESS"
+        result.actions = [action]
+        mock_modify.return_value = result
+
+        body = {"new_expiration_date": "2026-07-01"}
+        resp = client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dr_id"] == "DR-1042"
+        assert data["status"] == "SUCCESS"
+        assert "Extended expiration" in data["message"]
+
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_not_found(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        client, mock_db,
+    ):
+        """DR doesn't exist in control table => 404."""
+        MockDRRepo.return_value.get.return_value = None
+
+        body = {"new_expiration_date": "2026-07-01"}
+        resp = client.post("/api/drs/DR-9999/modify", json=body)
+        assert resp.status_code == 404
+
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_wrong_status(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        client, mock_db,
+    ):
+        """DR has status CLEANED_UP => 409 conflict."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(status="CLEANED_UP")
+
+        body = {"new_expiration_date": "2026-07-01"}
+        resp = client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 409
+
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_non_owner_403(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        user_client, mock_db,
+    ):
+        """Non-owner user gets 403 when modifying another user's DR."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="other@example.com",
+        )
+
+        body = {"new_expiration_date": "2026-07-01"}
+        resp = user_client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 403
+
+    @patch("devmirror.modify.modification_engine.modify_dr")
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_owner_allowed(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        mock_modify, user_client, mock_db,
+    ):
+        """Owner (non-admin) can modify their own DR."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="testuser@example.com",
+        )
+
+        action = MagicMock()
+        action.action = "ADD_DEVELOPER"
+        action.detail = "Added dev2@example.com"
+        result = MagicMock()
+        result.audit_status = "SUCCESS"
+        result.actions = [action]
+        mock_modify.return_value = result
+
+        body = {"add_developers": ["dev2@example.com"]}
+        resp = user_client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dr_id"] == "DR-1042"
+        assert data["status"] == "SUCCESS"
+
+    @patch("devmirror.modify.modification_engine.modify_dr")
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_engine_error(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        mock_modify, client, mock_db,
+    ):
+        """modify_dr raises ModificationError => 400."""
+        from devmirror.modify.modification_engine import ModificationError
+
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="testuser@example.com",
+        )
+        mock_modify.side_effect = ModificationError("Invalid expiration date")
+
+        body = {"new_expiration_date": "2020-01-01"}
+        resp = client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 400
+        assert "Invalid expiration date" in resp.json()["detail"]
+
+
+# ---- US-29: Admin-only gates on scan/manifest edit/provision/cleanup/reprovision ----
+
+
+class TestAdminOnlyEndpoints:
+    """US-29: Even resource owners (non-admin) get 403 on admin-only endpoints.
+
+    ``user_client`` authenticates as ``testuser@example.com`` with role ``"user"``.
+    All test configs/DRs are owned by that same user to prove that ownership
+    alone is insufficient -- admin role is required.
+    """
+
+    # -- POST /api/configs/{dr_id}/scan  (admin-only => 403 for user) ----------
+
+    def test_scan_requires_admin(self, user_client, mock_db):
+        """Owner with role=user gets 403 when scanning own config."""
+        mock_db.sql.return_value = [make_db_row(created_by="testuser@example.com")]
+        resp = user_client.post("/api/configs/DR-1042/scan")
+        assert resp.status_code == 403
+
+    # -- PUT /api/configs/{dr_id}/manifest (admin-only => 403 for user) --------
+
+    def test_update_manifest_requires_admin(self, user_client, mock_db):
+        """Owner with role=user gets 403 when updating own config's manifest."""
+        mock_db.sql.return_value = [make_db_row(created_by="testuser@example.com")]
+        new_manifest = {"scan_result": {"dr_id": "DR-1042", "objects": []}}
+        resp = user_client.put("/api/configs/DR-1042/manifest", json=new_manifest)
+        assert resp.status_code == 403
+
+    # -- POST /api/configs/{dr_id}/provision (admin-only => 403 for user) ------
+
+    def test_provision_requires_admin(self, user_client, mock_db):
+        """Owner with role=user gets 403 when provisioning own config."""
+        mock_db.sql.return_value = [make_db_row(created_by="testuser@example.com")]
+        resp = user_client.post("/api/configs/DR-1042/provision")
+        assert resp.status_code == 403
+
+    # -- POST /api/drs/{dr_id}/cleanup (admin-only => 403 for user) -----------
+
+    def test_cleanup_requires_admin(self, user_client, mock_db):
+        """Owner with role=user gets 403 when cleaning up own DR."""
+        resp = user_client.post("/api/drs/DR-1042/cleanup")
+        assert resp.status_code == 403
+
+    # -- POST /api/drs/{dr_id}/reprovision (admin-only => 403 for user) -------
+
+    def test_reprovision_requires_admin(self, user_client, mock_db):
+        """Owner with role=user gets 403 when reprovisioning own config."""
+        mock_db.sql.return_value = [make_db_row(created_by="testuser@example.com")]
+        resp = user_client.post("/api/drs/DR-1042/reprovision")
+        assert resp.status_code == 403
+
+    # -- POST /api/drs/{dr_id}/refresh (NOT admin-only => 202 for owner) ------
+
+    @patch("devmirror.refresh.refresh_engine.refresh_dr")
+    @patch("devmirror.control.audit.AuditRepository")
+    @patch("devmirror.control.control_table.DrObjectRepository")
+    @patch("devmirror.control.control_table.DRRepository")
+    def test_refresh_does_not_require_admin(
+        self, MockDRRepo, MockObjRepo, MockAuditRepo, mock_refresh,
+        user_client, mock_db,
+    ):
+        """Owner with role=user can refresh their own DR (202, not 403)."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="testuser@example.com",
+        )
+        mock_refresh.return_value = mock_refresh_result()
+
+        resp = user_client.post("/api/drs/DR-1042/refresh", json={"mode": "incremental"})
+        assert resp.status_code == 202

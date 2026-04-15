@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { getManifest, updateManifest, startProvision } from '../api';
+import { getManifest, getConfig, updateManifest, startProvision } from '../api';
+import { useUser } from '../UserContext';
 import type { ManifestData, ManifestObject } from '../types';
 
 export default function ScanResults() {
   const { drId } = useParams<{ drId: string }>();
   const navigate = useNavigate();
+  const { role, email } = useUser();
+  const isAdmin = role === 'admin';
 
   const [manifest, setManifest] = useState<ManifestData | null>(null);
   const [objects, setObjects] = useState<ManifestObject[]>([]);
@@ -14,14 +17,19 @@ export default function ScanResults() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [createdBy, setCreatedBy] = useState('');
 
   useEffect(() => {
     if (!drId) return;
     setLoading(true);
-    getManifest(drId)
-      .then((resp) => {
-        setManifest(resp.manifest);
-        setObjects(resp.manifest.objects ?? []);
+    Promise.all([
+      getManifest(drId),
+      getConfig(drId),
+    ])
+      .then(([manifestResp, configResp]) => {
+        setManifest(manifestResp.manifest);
+        setObjects(manifestResp.manifest.objects ?? []);
+        setCreatedBy(configResp.created_by ?? '');
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load manifest'))
       .finally(() => setLoading(false));
@@ -79,6 +87,14 @@ export default function ScanResults() {
         <Link to={`/config/${drId}`}>Back to Config</Link>
       </div>
 
+      {isAdmin && createdBy && createdBy !== email && (
+        <div className="owner-label">Owner: {createdBy}</div>
+      )}
+
+      {!isAdmin && (
+        <div className="banner banner-info">Scan results are pending admin review.</div>
+      )}
+
       {manifest.review_required && (
         <div className="banner banner-warning">
           Review required: some objects may need manual verification before provisioning.
@@ -119,7 +135,7 @@ export default function ScanResults() {
             <th>Access Mode</th>
             <th>Est. Size (MB)</th>
             <th>Clone Strategy</th>
-            <th></th>
+            {isAdmin && <th></th>}
           </tr>
         </thead>
         <tbody>
@@ -130,29 +146,33 @@ export default function ScanResults() {
               <td>{obj.access_mode}</td>
               <td>{obj.estimated_size_mb ?? '-'}</td>
               <td>{obj.clone_strategy}</td>
-              <td>
-                <button className="btn-sm btn-danger" onClick={() => handleRemove(obj.fqn)}>
-                  Remove
-                </button>
-              </td>
+              {isAdmin && (
+                <td>
+                  <button className="btn-sm btn-danger" onClick={() => handleRemove(obj.fqn)}>
+                    Remove
+                  </button>
+                </td>
+              )}
             </tr>
           ))}
           {objects.length === 0 && (
-            <tr><td colSpan={6} style={{ textAlign: 'center', color: '#6b7280' }}>No objects found.</td></tr>
+            <tr><td colSpan={isAdmin ? 6 : 5} style={{ textAlign: 'center', color: '#6b7280' }}>No objects found.</td></tr>
           )}
         </tbody>
       </table>
 
-      <div className="form-actions">
-        <button onClick={handleSave} disabled={saving || !dirty}>
-          {saving ? 'Saving...' : 'Save Changes'}
-        </button>
-        <button onClick={() => setShowConfirm(true)} disabled={saving}>
-          Approve &amp; Provision
-        </button>
-      </div>
+      {isAdmin && (
+        <div className="form-actions">
+          <button onClick={handleSave} disabled={saving || !dirty}>
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+          <button onClick={() => setShowConfirm(true)} disabled={saving}>
+            Approve &amp; Provision
+          </button>
+        </div>
+      )}
 
-      {showConfirm && (
+      {isAdmin && showConfirm && (
         <div className="dialog-overlay" onClick={() => setShowConfirm(false)}>
           <div className="dialog-box" onClick={(e) => e.stopPropagation()}>
             <h3>Confirm Provisioning</h3>

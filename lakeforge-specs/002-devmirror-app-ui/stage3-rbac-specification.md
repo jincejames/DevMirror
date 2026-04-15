@@ -64,7 +64,7 @@ A new FastAPI dependency `get_user_role(request) -> str` that:
 | `GET /api/drs/{id}/status` | Own DRs | All DRs |
 | `GET /api/drs` (list active DRs) | Own DRs | All DRs |
 | `POST /api/drs/{id}/cleanup` | No | Yes |
-| `POST /api/drs/{id}/refresh` | No | Yes |
+| `POST /api/drs/{id}/refresh` | Own DRs only | All DRs |
 | `POST /api/drs/{id}/reprovision` | No | Yes |
 
 ### 2.3 New Endpoint
@@ -150,7 +150,8 @@ The app fetches `GET /api/me` on load and stores the role in React context. All 
 
 **DR Status:**
 - Shows status, objects, audit log (read-only)
-- No "Cleanup", "Refresh", "Re-provision" buttons
+- No "Cleanup" or "Re-provision" buttons (admin only)
+- Shows a "Refresh" button to re-sync data from production on own DRs
 - Shows a "Modify" button to change expiration/users
 
 **DR List:**

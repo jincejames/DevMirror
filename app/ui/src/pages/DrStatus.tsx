@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { getDrStatus, cleanupDr, refreshDr, reprovisionDr } from '../api';
-import type { DrStatusResponse, CleanupResponse } from '../types';
+import { getDrStatus, cleanupDr, refreshDr, reprovisionDr, modifyDr } from '../api';
+import { useUser } from '../UserContext';
+import type { DrStatusResponse, CleanupResponse, ModifyDrRequest } from '../types';
 
 function statusBadgeClass(status: string): string {
   const key = status.toLowerCase();
@@ -16,6 +17,7 @@ type RefreshMode = 'incremental' | 'full' | 'selective';
 export default function DrStatus() {
   const { drId } = useParams<{ drId: string }>();
   const navigate = useNavigate();
+  const { role, email } = useUser();
   const [data, setData] = useState<DrStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -32,6 +34,16 @@ export default function DrStatus() {
   // Re-provision state
   const [showReprovision, setShowReprovision] = useState(false);
   const [reprovisioning, setReprovisioning] = useState(false);
+
+  // Modify state
+  const [showModify, setShowModify] = useState(false);
+  const [modExpiration, setModExpiration] = useState('');
+  const [modAddDevs, setModAddDevs] = useState('');
+  const [modRemoveDevs, setModRemoveDevs] = useState('');
+  const [modAddQa, setModAddQa] = useState('');
+  const [modRemoveQa, setModRemoveQa] = useState('');
+  const [modifying, setModifying] = useState(false);
+  const [modifySuccess, setModifySuccess] = useState('');
 
   function load() {
     if (!drId) return;
@@ -92,6 +104,45 @@ export default function DrStatus() {
     }
   }
 
+  function openModifyDialog() {
+    if (data) {
+      setModExpiration(data.expiration_date);
+    }
+    setModAddDevs('');
+    setModRemoveDevs('');
+    setModAddQa('');
+    setModRemoveQa('');
+    setModifySuccess('');
+    setShowModify(true);
+  }
+
+  async function handleModify() {
+    if (!drId) return;
+    setShowModify(false);
+    setModifying(true);
+    setModifySuccess('');
+    try {
+      const body: ModifyDrRequest = {};
+      if (modExpiration && modExpiration !== data?.expiration_date) {
+        body.new_expiration_date = modExpiration;
+      }
+      const parseEmails = (s: string) =>
+        s.split(',').map((e) => e.trim()).filter(Boolean);
+      if (modAddDevs.trim()) body.add_developers = parseEmails(modAddDevs);
+      if (modRemoveDevs.trim()) body.remove_developers = parseEmails(modRemoveDevs);
+      if (modAddQa.trim()) body.add_qa_users = parseEmails(modAddQa);
+      if (modRemoveQa.trim()) body.remove_qa_users = parseEmails(modRemoveQa);
+
+      const result = await modifyDr(drId, body);
+      setModifySuccess(result.message);
+      load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Modification failed');
+    } finally {
+      setModifying(false);
+    }
+  }
+
   function toggleSelectObject(fqn: string) {
     setSelectedObjects((prev) => {
       const next = new Set(prev);
@@ -108,9 +159,14 @@ export default function DrStatus() {
   if (error) return <p className="error-text">{error}</p>;
   if (!data) return <p className="error-text">No data.</p>;
 
-  const canCleanup = CLEANABLE.includes(data.status);
-  const canRefresh = REFRESHABLE.includes(data.status);
-  const canReprovision = REFRESHABLE.includes(data.status);
+  const isAdmin = role === 'admin';
+  const isOwner = data.created_by === email;
+  const canModify =
+    (isOwner || isAdmin) &&
+    ['ACTIVE', 'EXPIRING_SOON'].includes(data.status);
+  const canCleanup = isAdmin && CLEANABLE.includes(data.status);
+  const canRefresh = (isOwner || isAdmin) && REFRESHABLE.includes(data.status);
+  const canReprovision = isAdmin && REFRESHABLE.includes(data.status);
 
   return (
     <div>
@@ -119,11 +175,21 @@ export default function DrStatus() {
         <Link to="/drs">Back to DRs</Link>
       </div>
 
+      {isAdmin && data.created_by && data.created_by !== email && (
+        <div className="owner-label">Owner: {data.created_by}</div>
+      )}
+
       {cleanupResult && (
         <div className="banner banner-success">
           Cleanup complete: {cleanupResult.objects_dropped} objects dropped,{' '}
           {cleanupResult.schemas_dropped} schemas dropped,{' '}
           {cleanupResult.revokes_succeeded} revokes succeeded.
+        </div>
+      )}
+
+      {modifySuccess && (
+        <div className="banner banner-success">
+          Modification applied: {modifySuccess}
         </div>
       )}
 
@@ -220,6 +286,15 @@ export default function DrStatus() {
       )}
 
       <div className="form-actions">
+        {canModify && (
+          <button
+            className="btn-secondary"
+            onClick={openModifyDialog}
+            disabled={modifying}
+          >
+            {modifying ? 'Modifying...' : 'Modify'}
+          </button>
+        )}
         {canRefresh && (
           <button
             className="btn-secondary"
@@ -244,6 +319,69 @@ export default function DrStatus() {
           </button>
         )}
       </div>
+
+      {/* Modify Dialog */}
+      {showModify && (
+        <div className="dialog-overlay" onClick={() => setShowModify(false)}>
+          <div className="dialog-box" onClick={(e) => e.stopPropagation()}>
+            <h3>Modify DR</h3>
+            <p>Update expiration date or manage user access for {drId}.</p>
+            <div className="form-field">
+              <label htmlFor="mod-expiration">Expiration Date</label>
+              <input
+                id="mod-expiration"
+                type="date"
+                value={modExpiration}
+                onChange={(e) => setModExpiration(e.target.value)}
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="mod-add-devs">Add Developers (comma-separated emails)</label>
+              <input
+                id="mod-add-devs"
+                type="text"
+                placeholder="user1@example.com, user2@example.com"
+                value={modAddDevs}
+                onChange={(e) => setModAddDevs(e.target.value)}
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="mod-remove-devs">Remove Developers (comma-separated emails)</label>
+              <input
+                id="mod-remove-devs"
+                type="text"
+                placeholder="user1@example.com"
+                value={modRemoveDevs}
+                onChange={(e) => setModRemoveDevs(e.target.value)}
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="mod-add-qa">Add QA Users (comma-separated emails)</label>
+              <input
+                id="mod-add-qa"
+                type="text"
+                placeholder="qa1@example.com"
+                value={modAddQa}
+                onChange={(e) => setModAddQa(e.target.value)}
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="mod-remove-qa">Remove QA Users (comma-separated emails)</label>
+              <input
+                id="mod-remove-qa"
+                type="text"
+                placeholder="qa1@example.com"
+                value={modRemoveQa}
+                onChange={(e) => setModRemoveQa(e.target.value)}
+              />
+            </div>
+            <div className="dialog-actions">
+              <button className="btn-secondary" onClick={() => setShowModify(false)}>Cancel</button>
+              <button onClick={handleModify}>Apply Changes</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Refresh Dialog */}
       {showRefresh && (

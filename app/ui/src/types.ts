@@ -1,5 +1,11 @@
 /** TypeScript interfaces matching backend Pydantic models. */
 
+export interface UserInfo {
+  email: string;
+  role: 'admin' | 'user';
+  display_name: string;
+}
+
 export interface ConfigIn {
   dr_id: string;
   description?: string | null;
@@ -119,6 +125,7 @@ export interface DrStatusResponse {
   description: string | null;
   expiration_date: string;
   created_at: string;
+  created_by: string;
   last_refreshed_at: string | null;
   objects: DrObject[];
   total_objects: number;
@@ -167,6 +174,20 @@ export interface CleanupResponse {
 export interface RefreshStartResponse {
   dr_id: string;
   task_id: string;
+  status: string;
+  message: string;
+}
+
+export interface ModifyDrRequest {
+  new_expiration_date?: string | null;
+  add_developers?: string[] | null;
+  remove_developers?: string[] | null;
+  add_qa_users?: string[] | null;
+  remove_qa_users?: string[] | null;
+}
+
+export interface ModifyDrResponse {
+  dr_id: string;
   status: string;
   message: string;
 }

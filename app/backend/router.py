@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from .auth import UserInfo, get_user_role, require_owner_or_admin
 from .config import get_current_user, get_db_client, get_settings
 from .helpers import (
     _auto_scan,
@@ -36,6 +37,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ---- 0. GET /api/me (currentUser) ----------------------------------------
+
+@router.get("/me", response_model=UserInfo, operation_id="currentUser")
+def current_user_info(
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
+) -> UserInfo:
+    """Return the authenticated user's identity and resolved role."""
+    prefix = current_user.split("@")[0] if "@" in current_user else current_user
+    display_name = prefix.replace(".", " ").replace("_", " ").title()
+    return UserInfo(email=current_user, role=role, display_name=display_name)
 
 
 # ---- 1. POST /api/configs (createConfig) ---------------------------------
@@ -92,10 +106,14 @@ def create_config(
 def list_configs(
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ConfigListResponse:
     """List all DevMirror configs."""
     repo = _get_repo(settings)
     rows = repo.list_all(db_client)
+    if role != "admin":
+        rows = [r for r in rows if r.get("created_by") == current_user]
     items = [_row_to_list_item(r) for r in rows]
     return ConfigListResponse(configs=items, total=len(items))
 
@@ -111,12 +129,15 @@ def get_config(
     dr_id: str,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ConfigOut:
     """Get a single DevMirror config by DR ID."""
     repo = _get_repo(settings)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
     return _row_to_config_out(row)
 
 
@@ -132,12 +153,15 @@ def update_config(
     config_in: ConfigIn,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ConfigOut:
     """Update an existing DevMirror config."""
     repo = _get_repo(settings)
     existing = repo.get(db_client, dr_id=dr_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(existing, current_user, role)
 
     was_provisioned = existing.get("status") == "provisioned"
 
@@ -182,12 +206,15 @@ def delete_config(
     dr_id: str,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> Response:
     """Delete a DevMirror config."""
     repo = _get_repo(settings)
     existing = repo.get(db_client, dr_id=dr_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(existing, current_user, role)
     if existing.get("status") == "provisioned":
         raise HTTPException(
             status_code=409,
@@ -208,12 +235,15 @@ def revalidate_config(
     dr_id: str,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ValidationResult:
     """Re-validate an existing config and update its status/errors."""
     repo = _get_repo(settings)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
 
     config_in = _parse_config_in(row["config_json"])
     status, all_errors, _dm_config = _validate_config(config_in)
@@ -244,12 +274,15 @@ def export_config_yaml(
     dr_id: str,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> Response:
     """Export config as a downloadable YAML file."""
     repo = _get_repo(settings)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
 
     yaml_content = row.get("config_yaml", "")
     return Response(

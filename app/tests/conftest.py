@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from unittest.mock import MagicMock
 
 import pytest
+from backend.auth import get_user_role
 from backend.config import get_current_user, get_db_client, get_settings, get_task_tracker
 from backend.main import app
 from backend.tasks import TaskTracker
@@ -140,13 +141,56 @@ def task_tracker():
 
 @pytest.fixture()
 def client(mock_db, settings, task_tracker):
-    """Create a TestClient with all deps mocked (including task_tracker)."""
+    """Create a TestClient with all deps mocked (including task_tracker).
+
+    The ``get_user_role`` dependency is overridden to return ``"admin"`` so
+    that existing tests continue to work unchanged.
+    """
     app.dependency_overrides[get_db_client] = lambda: mock_db
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_current_user] = lambda: "testuser@example.com"
     app.dependency_overrides[get_task_tracker] = lambda: task_tracker
+    app.dependency_overrides[get_user_role] = lambda: "admin"
 
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def user_client(mock_db, settings, task_tracker):
+    """TestClient where the caller has role ``"user"`` (not admin)."""
+    app.dependency_overrides[get_db_client] = lambda: mock_db
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_current_user] = lambda: "testuser@example.com"
+    app.dependency_overrides[get_task_tracker] = lambda: task_tracker
+    app.dependency_overrides[get_user_role] = lambda: "user"
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+    app.dependency_overrides.clear()
+
+
+def make_client(role: str = "admin", email: str = "testuser@example.com"):
+    """Factory: create a TestClient with a specific role and email.
+
+    Uses a fresh ``MagicMock`` for ``db_client`` and returns
+    ``(TestClient, mock_db)`` so callers can set up DB expectations.
+    """
+    mock_db = MagicMock()
+    _settings = Settings(
+        warehouse_id="test-wh",
+        control_catalog="test_catalog",
+        control_schema="test_schema",
+    )
+    _tracker = TaskTracker()
+
+    app.dependency_overrides[get_db_client] = lambda: mock_db
+    app.dependency_overrides[get_settings] = lambda: _settings
+    app.dependency_overrides[get_current_user] = lambda: email
+    app.dependency_overrides[get_task_tracker] = lambda: _tracker
+    app.dependency_overrides[get_user_role] = lambda: role
+
+    return TestClient(app, raise_server_exceptions=False), mock_db

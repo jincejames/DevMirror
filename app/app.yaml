@@ -5,5 +5,10 @@ command:
   - --port=8000
 env:
   - name: DEVMIRROR_WAREHOUSE_ID
+    value: e9b34f7a2e4b0561
   - name: DEVMIRROR_CONTROL_CATALOG
+    value: users
   - name: DEVMIRROR_CONTROL_SCHEMA
+    value: jince_james
+  - name: DEVMIRROR_ADMIN_GROUP
+    value: devmirror-admins

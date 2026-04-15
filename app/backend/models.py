@@ -196,6 +196,7 @@ class DrStatusResponse(BaseModel):
     description: str | None
     expiration_date: str
     created_at: str
+    created_by: str
     last_refreshed_at: str | None
     objects: list[dict]
     total_objects: int
@@ -244,5 +245,23 @@ class RefreshStartResponse(BaseModel):
 
     dr_id: str
     task_id: str
+    status: str
+    message: str
+
+
+class ModifyDrRequest(BaseModel):
+    """Request body for modifying a provisioned DR."""
+
+    new_expiration_date: str | None = None
+    add_developers: list[str] | None = None
+    remove_developers: list[str] | None = None
+    add_qa_users: list[str] | None = None
+    remove_qa_users: list[str] | None = None
+
+
+class ModifyDrResponse(BaseModel):
+    """Response from a DR modification."""
+
+    dr_id: str
     status: str
     message: str

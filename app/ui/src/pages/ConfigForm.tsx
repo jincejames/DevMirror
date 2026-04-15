@@ -13,6 +13,7 @@ import MultiInput from '../components/MultiInput';
 import RevisionSelector from '../components/RevisionSelector';
 import StreamSearch from '../components/StreamSearch';
 import ValidationBanner from '../components/ValidationBanner';
+import { useUser } from '../UserContext';
 
 const EMPTY_FORM: ConfigIn = {
   dr_id: '',
@@ -35,6 +36,7 @@ export default function ConfigForm() {
   const { drId } = useParams<{ drId: string }>();
   const isEdit = Boolean(drId);
   const navigate = useNavigate();
+  const { role, email } = useUser();
 
   const [form, setForm] = useState<ConfigIn>({ ...EMPTY_FORM });
   const [errors, setErrors] = useState<FieldError[]>([]);
@@ -45,6 +47,8 @@ export default function ConfigForm() {
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [reprovisioning, setReprovisioning] = useState(false);
+  const [savedBanner, setSavedBanner] = useState(false);
+  const [createdBy, setCreatedBy] = useState('');
 
   const isProvisioned = status === 'provisioned';
 
@@ -61,6 +65,7 @@ export default function ConfigForm() {
           qa_users: out.config.qa_users ?? [],
           notification_recipients: out.config.notification_recipients ?? [],
         });
+        setCreatedBy(out.created_by ?? '');
         setErrors(out.validation_errors);
         setStatus(out.status);
         setIsValid(out.status === 'valid' || out.status === 'provisioned');
@@ -91,6 +96,7 @@ export default function ConfigForm() {
     e.preventDefault();
     setSaving(true);
     setShowBanner(false);
+    setSavedBanner(false);
     try {
       const payload: ConfigIn = {
         ...form,
@@ -120,6 +126,13 @@ export default function ConfigForm() {
           setErrors(out.validation_errors);
           setIsValid(true);
           setShowBanner(true);
+        } else if (role === 'user') {
+          // Non-admin: show pending review banner instead of navigating away
+          setStatus(out.status);
+          setErrors(out.validation_errors);
+          setIsValid(true);
+          setShowBanner(true);
+          setSavedBanner(true);
         } else {
           // Valid but scan didn't run (scan failure is non-blocking)
           navigate('/');
@@ -252,6 +265,10 @@ export default function ConfigForm() {
         </button>
       </div>
 
+      {role === 'admin' && createdBy && createdBy !== email && (
+        <div className="owner-label">Owner: {createdBy}</div>
+      )}
+
       {isProvisioned && (
         <div className="banner banner-warning">
           This config is already provisioned. Saving will update the config but not the live objects.
@@ -260,6 +277,12 @@ export default function ConfigForm() {
       )}
 
       {showBanner && <ValidationBanner errors={errors} isValid={isValid} />}
+
+      {savedBanner && (
+        <div className="banner banner-info">
+          Config saved. Pending admin review for provisioning.
+        </div>
+      )}
 
       <form onSubmit={handleSubmit}>
         {/* Section 1: Basic Info */}
@@ -456,7 +479,7 @@ export default function ConfigForm() {
               Re-validate
             </button>
           )}
-          {isEdit && isProvisioned && (
+          {isEdit && isProvisioned && role === 'admin' && (
             <button
               type="button"
               onClick={handleReprovision}

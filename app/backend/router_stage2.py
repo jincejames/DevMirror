@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .config import get_db_client, get_settings, get_task_tracker
+from .auth import get_user_role, require_admin, require_owner_or_admin
+from .config import get_current_user, get_db_client, get_settings, get_task_tracker
 from .helpers import (
     _control_repos,
     _get_repo,
@@ -24,6 +25,8 @@ from .models import (
     DrListResponse,
     DrStatusResponse,
     ManifestResponse,
+    ModifyDrRequest,
+    ModifyDrResponse,
     ProvisionStartResponse,
     RefreshRequest,
     RefreshStartResponse,
@@ -50,14 +53,18 @@ router_stage2 = APIRouter()
 )
 def scan_config(
     dr_id: str,
+    _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ScanResponse:
     """Trigger an object discovery scan for a saved config."""
     repo = _get_repo(settings)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
 
     if row["status"] == "invalid":
         raise HTTPException(
@@ -98,9 +105,18 @@ def get_manifest(
     dr_id: str,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ManifestResponse:
     """Retrieve the stored scan manifest for review."""
     repo = _get_repo(settings)
+
+    # Ownership check: fetch the config row to verify created_by
+    row = repo.get(db_client, dr_id=dr_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
+
     result = repo.get_manifest(db_client, dr_id=dr_id)
     if result is None:
         raise HTTPException(
@@ -124,14 +140,18 @@ def get_manifest(
 def update_manifest(
     dr_id: str,
     manifest: dict,
+    _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ManifestResponse:
     """Save a modified manifest after human review."""
     repo = _get_repo(settings)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
 
     # Validate minimal manifest structure
     scan_result = manifest.get("scan_result")
@@ -167,9 +187,12 @@ def update_manifest(
 )
 def provision_config(
     dr_id: str,
+    _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     task_tracker: TaskTracker = Depends(get_task_tracker),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ProvisionStartResponse:
     """Start provisioning of dev/qa objects from an approved manifest."""
     from devmirror.provision.runner import provision_dr
@@ -178,6 +201,7 @@ def provision_config(
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
 
     if row["status"] == "invalid":
         raise HTTPException(
@@ -270,6 +294,8 @@ def get_dr_status(
     dr_id: str,
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> DrStatusResponse:
     """Get the full lifecycle status of a provisioned DR."""
     dr_repo, obj_repo, _access_repo, audit_repo = _control_repos(settings)
@@ -279,6 +305,7 @@ def get_dr_status(
         raise HTTPException(
             status_code=404, detail=f"DR {dr_id} not found in control tables"
         )
+    require_owner_or_admin(dr_row, current_user, role)
 
     objects = obj_repo.list_by_dr_id(db_client, dr_id=dr_id)
     audit_entries = audit_repo.list_by_dr_id(db_client, dr_id=dr_id, limit=20)
@@ -295,6 +322,7 @@ def get_dr_status(
         description=dr_row.get("description"),
         expiration_date=dr_row.get("expiration_date", ""),
         created_at=dr_row.get("created_at", ""),
+        created_by=dr_row.get("created_by", ""),
         last_refreshed_at=dr_row.get("last_refreshed_at"),
         objects=objects,
         total_objects=len(objects),
@@ -313,11 +341,15 @@ def get_dr_status(
 def list_drs(
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> DrListResponse:
     """List all provisioned DRs from the control table."""
     dr_repo, _obj_repo, _access_repo, _audit_repo = _control_repos(settings)
 
     rows = dr_repo.list_active(db_client)
+    if role != "admin":
+        rows = [r for r in rows if r.get("created_by") == current_user]
     items: list[DrListItem] = []
     for row in rows:
         items.append(
@@ -344,12 +376,24 @@ def list_drs(
 )
 def cleanup_dr_endpoint(
     dr_id: str,
+    _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     task_tracker: TaskTracker = Depends(get_task_tracker),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> CleanupResponse:
     """Manually trigger cleanup for a specific DR."""
     from devmirror.cleanup.cleanup_engine import cleanup_dr
+
+    # Ownership check on the DR
+    dr_repo_check, _obj_check, _access_check, _audit_check = _control_repos(settings)
+    dr_row = dr_repo_check.get(db_client, dr_id=dr_id)
+    if dr_row is None:
+        raise HTTPException(
+            status_code=404, detail=f"DR {dr_id} not found in control tables"
+        )
+    require_owner_or_admin(dr_row, current_user, role)
 
     # Guard against concurrent cleanups for the same DR
     running = task_tracker.list_for_dr(dr_id)
@@ -398,6 +442,8 @@ def refresh_dr_endpoint(
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     task_tracker: TaskTracker = Depends(get_task_tracker),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> RefreshStartResponse:
     """Start a refresh (re-sync) of dev objects from production."""
     from devmirror.refresh.refresh_engine import refresh_dr
@@ -411,6 +457,7 @@ def refresh_dr_endpoint(
             status_code=404,
             detail=f"DR {dr_id} not found in control tables",
         )
+    require_owner_or_admin(dr_row, current_user, role)
     dr_status = dr_row.get("status", "")
     if dr_status not in ("ACTIVE", "EXPIRING_SOON", "FAILED"):
         raise HTTPException(
@@ -459,9 +506,12 @@ def refresh_dr_endpoint(
 )
 def reprovision_dr_endpoint(
     dr_id: str,
+    _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     task_tracker: TaskTracker = Depends(get_task_tracker),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> ProvisionStartResponse:
     """Re-scan and re-provision all objects for an already-provisioned DR."""
     from devmirror.provision.runner import provision_dr
@@ -473,6 +523,7 @@ def reprovision_dr_endpoint(
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+    require_owner_or_admin(row, current_user, role)
 
     # 2. Validate DR is ACTIVE or EXPIRING_SOON in control table
     dr_row = dr_repo.get(db_client, dr_id=dr_id)
@@ -539,4 +590,72 @@ def reprovision_dr_endpoint(
         task_id=task_id,
         status="reprovisioning",
         message=f"Re-provisioning started. Poll GET /api/tasks/{task_id} for progress.",
+    )
+
+
+# ---- 19. POST /api/drs/{dr_id}/modify (modifyDr) ----------------------------
+
+@router_stage2.post(
+    "/drs/{dr_id}/modify",
+    response_model=ModifyDrResponse,
+    operation_id="modifyDr",
+)
+def modify_dr_endpoint(
+    dr_id: str,
+    body: ModifyDrRequest,
+    db_client: DbClient = Depends(get_db_client),
+    settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
+) -> ModifyDrResponse:
+    """Modify expiration date or user access on a provisioned DR."""
+    from devmirror.modify.modification_engine import ModificationError, modify_dr
+
+    dr_repo, obj_repo, access_repo, audit_repo = _control_repos(settings)
+
+    # 1. Get DR from control table, 404 if not found
+    dr_row = dr_repo.get(db_client, dr_id=dr_id)
+    if dr_row is None:
+        raise HTTPException(
+            status_code=404, detail=f"DR {dr_id} not found in control tables"
+        )
+
+    # 2. Ownership check
+    require_owner_or_admin(dr_row, current_user, role)
+
+    # 3. Validate DR status is ACTIVE or EXPIRING_SOON
+    dr_status = dr_row.get("status", "")
+    if dr_status not in ("ACTIVE", "EXPIRING_SOON"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"DR {dr_id} has status {dr_status}. "
+            "Modification is only allowed on ACTIVE or EXPIRING_SOON DRs.",
+        )
+
+    # 4. Call the modification engine
+    try:
+        result = modify_dr(
+            dr_id,
+            db_client=db_client,
+            dr_repo=dr_repo,
+            obj_repo=obj_repo,
+            access_repo=access_repo,
+            audit_repo=audit_repo,
+            add_dev_users=body.add_developers,
+            remove_dev_users=body.remove_developers,
+            add_qa_users=body.add_qa_users,
+            remove_qa_users=body.remove_qa_users,
+            new_expiration_date=body.new_expiration_date,
+        )
+    except ModificationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 5. Build response message from actions
+    action_summaries = [a.detail or a.action for a in result.actions]
+    message = "; ".join(action_summaries) if action_summaries else "No changes applied."
+
+    return ModifyDrResponse(
+        dr_id=dr_id,
+        status=result.audit_status,
+        message=message,
     )

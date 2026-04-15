@@ -122,17 +122,23 @@
 
 ---
 
-## US-30: Admin triggers refresh and cleanup
+## US-30: Admin triggers refresh and cleanup; users can refresh own DRs
 
 **As an** admin,
 **I want to** refresh dev data and clean up expired DRs,
 **So that** dev environments stay current and unused ones are removed.
 
+**As a** developer with an active DR,
+**I want to** refresh my own dev environment data from production,
+**So that** I can work with up-to-date data without asking an admin.
+
 **Acceptance Criteria:**
-1. On any active DR, I see "Refresh", "Re-provision", and "Cleanup" buttons.
+1. On any active DR, admins see "Refresh", "Re-provision", and "Cleanup" buttons.
 2. Refresh supports incremental, full, and selective modes.
 3. Cleanup shows a confirmation with object/schema/grant counts.
-4. These buttons are not visible to regular users.
+4. "Cleanup" and "Re-provision" buttons are not visible to regular users (admin only).
+5. Regular users see a "Refresh" button on their own active DRs.
+6. Users can only refresh DRs they own; attempting to refresh another user's DR returns 403.
 
 **Priority:** P0
 

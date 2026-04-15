@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { listConfigs, deleteConfig, exportYaml, scanConfig, reprovisionDr } from '../api';
+import { useUser } from '../UserContext';
 import type { ConfigListItem } from '../types';
 
 export default function ConfigList() {
@@ -8,6 +9,8 @@ export default function ConfigList() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const { role } = useUser();
+  const isAdmin = role === 'admin';
 
   async function load() {
     setLoading(true);
@@ -140,7 +143,7 @@ export default function ConfigList() {
                       Edit
                     </button>
                   )}
-                  {c.status === 'valid' && (
+                  {c.status === 'valid' && isAdmin && (
                     scanning === c.dr_id ? (
                       <span className="scanning-indicator">
                         <span className="mini-spinner" /> Scanning...
@@ -156,14 +159,16 @@ export default function ConfigList() {
                       <button className="btn-sm" onClick={() => navigate(`/config/${c.dr_id}/scan`)}>
                         Review
                       </button>
-                      {scanning === c.dr_id ? (
-                        <span className="scanning-indicator">
-                          <span className="mini-spinner" /> Scanning...
-                        </span>
-                      ) : (
-                        <button className="btn-sm btn-secondary" onClick={() => handleScan(c.dr_id)}>
-                          Re-scan
-                        </button>
+                      {isAdmin && (
+                        scanning === c.dr_id ? (
+                          <span className="scanning-indicator">
+                            <span className="mini-spinner" /> Scanning...
+                          </span>
+                        ) : (
+                          <button className="btn-sm btn-secondary" onClick={() => handleScan(c.dr_id)}>
+                            Re-scan
+                          </button>
+                        )
                       )}
                     </>
                   )}
@@ -175,14 +180,16 @@ export default function ConfigList() {
                       <button className="btn-sm" onClick={() => navigate(`/dr/${c.dr_id}`)}>
                         Status
                       </button>
-                      {reprovisioningId === c.dr_id ? (
-                        <span className="scanning-indicator">
-                          <span className="mini-spinner" /> Re-provisioning...
-                        </span>
-                      ) : (
-                        <button className="btn-sm" onClick={() => handleReprovision(c.dr_id)}>
-                          Re-provision
-                        </button>
+                      {isAdmin && (
+                        reprovisioningId === c.dr_id ? (
+                          <span className="scanning-indicator">
+                            <span className="mini-spinner" /> Re-provisioning...
+                          </span>
+                        ) : (
+                          <button className="btn-sm" onClick={() => handleReprovision(c.dr_id)}>
+                            Re-provision
+                          </button>
+                        )
                       )}
                     </>
                   )}

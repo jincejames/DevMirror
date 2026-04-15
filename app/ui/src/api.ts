@@ -1,6 +1,7 @@
 /** API client -- plain fetch wrappers for every backend endpoint. */
 
 import type {
+  UserInfo,
   ConfigIn,
   ConfigOut,
   ConfigListResponse,
@@ -15,17 +16,42 @@ import type {
   DrListResponse,
   CleanupResponse,
   RefreshStartResponse,
+  ModifyDrRequest,
+  ModifyDrResponse,
 } from './types';
 
 const BASE = '/api';
+
+/**
+ * Map a non-ok response to an Error with a user-friendly message.
+ * 403 responses are translated to clear permission-denied text.
+ */
+function buildResponseError(status: number, body: string): Error {
+  if (status === 403) {
+    let detail = '';
+    try {
+      const parsed = JSON.parse(body) as { detail?: string };
+      detail = parsed.detail ?? '';
+    } catch { /* body may not be JSON */ }
+    if (detail.includes('Admin access required')) {
+      return new Error('This action requires admin access. Contact your platform team.');
+    }
+    return new Error('You do not have permission to perform this action.');
+  }
+  return new Error(body || `HTTP ${status}`);
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(body || `HTTP ${res.status}`);
+    throw buildResponseError(res.status, body);
   }
   return res.json() as Promise<T>;
+}
+
+export async function getMe(): Promise<UserInfo> {
+  return request<UserInfo>(`${BASE}/me`);
 }
 
 export async function createConfig(data: ConfigIn): Promise<ConfigOut> {
@@ -58,7 +84,7 @@ export async function deleteConfig(drId: string): Promise<void> {
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(body || `HTTP ${res.status}`);
+    throw buildResponseError(res.status, body);
   }
 }
 
@@ -75,7 +101,7 @@ export async function exportYaml(drId: string): Promise<Blob> {
   );
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(body || `HTTP ${res.status}`);
+    throw buildResponseError(res.status, body);
   }
   return res.blob();
 }
@@ -180,5 +206,16 @@ export async function reprovisionDr(drId: string): Promise<ProvisionStartRespons
   return request<ProvisionStartResponse>(
     `${BASE}/drs/${encodeURIComponent(drId)}/reprovision`,
     { method: 'POST' },
+  );
+}
+
+export async function modifyDr(drId: string, body: ModifyDrRequest): Promise<ModifyDrResponse> {
+  return request<ModifyDrResponse>(
+    `${BASE}/drs/${encodeURIComponent(drId)}/modify`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
   );
 }

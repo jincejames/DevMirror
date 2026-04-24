@@ -37,11 +37,18 @@ def _validate_schema_fqn(schema_fqn: str) -> None:
 
 
 def _validate_principal(principal: str) -> None:
-    """Validate a principal identifier for safe SQL interpolation."""
+    """Validate a principal identifier for safe SQL interpolation.
+
+    A principal may be a user email (``alice@co.com``), a Databricks account
+    group name (``data-engineers``), or a service principal application ID.
+    """
     if not _SAFE_PRINCIPAL.match(principal):
         raise AccessManagerError(
             f"Unsafe principal identifier: {principal!r}. "
-            "Only alphanumeric characters, dots, underscores, hyphens, and @ are allowed."
+            "Expected a user email (e.g. 'alice@co.com'), a Databricks account "
+            "group name (e.g. 'data-engineers'), or a service principal "
+            "application ID. Only alphanumeric characters, dots, underscores, "
+            "hyphens, and @ are allowed."
         )
 
 

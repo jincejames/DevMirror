@@ -145,11 +145,18 @@ class TestDevelopmentRequest:
         assert dr.environments.qa is not None
 
     def test_dr_id_valid_patterns(self) -> None:
-        for dr_id in ["DR-0", "DR-1", "DR-1042", "DR-999999"]:
+        # Legacy DR-<digits> plus the new auto-generated format (US-34).
+        valid_ids = [
+            "DR-0", "DR-1", "DR-1042", "DR-999999",
+            "DR00001", "DR12345", "ABC000", "PROJ00042",
+        ]
+        for dr_id in valid_ids:
             assert DevelopmentRequest(**_minimal_dr_dict(dr_id=dr_id)).dr_id == dr_id
 
     def test_dr_id_invalid_patterns(self) -> None:
-        for bad_id in ["DR-", "dr-100", "DR100", "WR-100", "DR-abc", "", "DR-12-34"]:
+        # These must match NEITHER the legacy DR-<digits> nor the new
+        # auto-generated <PREFIX><zero-padded-digits> pattern.
+        for bad_id in ["DR-", "dr-100", "WR-100", "DR-abc", "", "DR-12-34", "DR1", "1DR123"]:
             with pytest.raises(ValidationError, match="dr_id"):
                 DevelopmentRequest(**_minimal_dr_dict(dr_id=bad_id))
 

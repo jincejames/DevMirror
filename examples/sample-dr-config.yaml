@@ -1,33 +1,129 @@
+# =============================================================================
+# DevMirror Development Request - Complete Configuration Reference
+# =============================================================================
+# This file demonstrates EVERY valid option accepted by the DevMirror config
+# schema (see devmirror/config/schema.py). It is intended as a practical
+# reference for CLI users who are not using the web UI.
+#
+# Mutually exclusive options (e.g. data_revision modes) are shown with the
+# conflicting alternatives commented out. The file as-written validates
+# cleanly against DevMirrorConfig.model_validate().
+#
+# To validate this file:
+#   python3 -c "from devmirror.config.schema import load_development_request; \
+#               load_development_request('examples/sample-dr-config.yaml')"
+#
+# To submit via the CLI:
+#   devmirror validate --config examples/sample-dr-config.yaml
+#   devmirror scan     --config examples/sample-dr-config.yaml
+#   devmirror provision --config examples/sample-dr-config.yaml
+# =============================================================================
+
+# ---- Top level -------------------------------------------------------------
+# REQUIRED. Config schema version. Currently the only accepted value is "1.0".
 version: "1.0"
 
 development_request:
-  dr_id: "DR-1001"
-  description: "Example: clone a pipeline's objects to dev"
+  # ---- Identity ------------------------------------------------------------
+  # REQUIRED. Must match pattern ^DR-[0-9]+$ (e.g. DR-1, DR-1042).
+  dr_id: "DR-1042"
 
+  # OPTIONAL. Free-form human-readable description of the request.
+  description: "Clone the daily_revenue pipeline plus its upstream dependencies into a dev environment for Q2 feature work."
+
+  # ---- Production sources to clone -----------------------------------------
+  # REQUIRED. At least one stream (Databricks Workflow or Lakeflow Pipeline)
+  # whose outputs should be cloned. Each entry resolves via the workspace
+  # jobs/pipelines APIs, and all declared outputs become seeds for lineage.
   streams:
-    - name: "your-pipeline-or-job-name"
+    - name: "daily_revenue_pipeline"
+    - name: "customer_enrichment_job"
 
+  # OPTIONAL. Additional Unity Catalog objects to include on top of what
+  # stream lineage discovers. Each entry MUST be a 3-part fully qualified
+  # name: catalog.schema.object. Used for tables, views, materialized views.
+  additional_objects:
+    - "prod_catalog.reference.country_codes"
+    - "prod_catalog.reference.currency_rates"
+    - "prod_catalog.shared.exchange_calendar"
+
+  # ---- Environments --------------------------------------------------------
+  # REQUIRED. Controls which target environments are provisioned.
   environments:
+    # dev is ALWAYS enabled; the enabled field must be literally `true`.
     dev:
       enabled: true
-    # qa:
-    #   enabled: true
 
+    # OPTIONAL. QA environment — disabled by default.
+    # If `qa.enabled: true`, then `access.qa_users` below must be a non-empty
+    # list (enforced by validate_config_for_submission, not by the schema).
+    qa:
+      enabled: true
+
+  # ---- Data revision (how snapshot the cloned data) ------------------------
+  # REQUIRED. Exactly ONE `mode` applies per request.
+  # These three modes are mutually exclusive — pick one and comment the rest.
   data_revision:
+    # (1) ACTIVE: clone the latest committed state. No extra fields needed.
     mode: "latest"
+
+    # (2) ALTERNATIVE — clone at a specific Delta table version.
+    #     Requires `version: <non-negative int>`. Uncomment and remove the
+    #     `mode: "latest"` line above to use this mode.
     # mode: "version"
     # version: 42
+
+    # (3) ALTERNATIVE — clone at a specific point in time.
+    #     Requires `timestamp: <ISO 8601 string>`. The string must parse
+    #     via datetime.fromisoformat() after replacing a trailing "Z" with
+    #     "+00:00". Uncomment and remove the `mode: "latest"` line above
+    #     to use this mode.
     # mode: "timestamp"
     # timestamp: "2026-04-01T00:00:00Z"
 
+  # ---- Access --------------------------------------------------------------
+  # REQUIRED. Who gets access to the cloned dev (and optionally qa) schemas.
+  #
+  # NOTE: Each entry in `developers` / `qa_users` can be:
+  #   - a user email          (e.g. "alice@company.com")
+  #   - a Databricks account GROUP name (e.g. "data-engineers")
+  #   - a service principal application ID (UUID)
+  # The string is passed as-is to the Databricks grants API, which resolves
+  # users, groups, and service principals transparently. Mixing types in the
+  # same list is supported.
   access:
+    # REQUIRED. At least one non-blank entry.
     developers:
-      - "your.email@company.com"
-    # qa_users:
-    #   - "qa.user@company.com"
+      - "alice.smith@company.com"     # individual user
+      - "bob.jones@company.com"       # individual user
+      - "data-engineers"              # account group (all members get access)
 
+    # OPTIONAL at schema level, but REQUIRED (by policy) when
+    # environments.qa.enabled is true. Ignored if qa is disabled.
+    qa_users:
+      - "qa-team"                     # account group
+      - "qa-engineer@company.com"     # individual user
+
+  # ---- Lifecycle -----------------------------------------------------------
+  # REQUIRED. Controls how long the DR lives and when users get notified.
   lifecycle:
-    expiration_date: "2026-07-14"
+    # REQUIRED. ISO 8601 date (YYYY-MM-DD). Must be:
+    #   - strictly in the future (> today), and
+    #   - within max_dr_duration_days from today (default: 90).
+    # Exceeding the max raises ConfigValidationError at submission time.
+    expiration_date: "2026-07-01"
+
+    # OPTIONAL. Non-negative integer. Default: 7.
+    # How many days before expiration to send the expiry warning email.
     notification_days_before: 7
+
+    # OPTIONAL. If omitted, notifications fall back to `access.developers`.
+    #
+    # NOTE: The notifier backend shipped today is a logging stub
+    # (see devmirror/cleanup/notifier.py::LoggingBackend) -- recipients are
+    # logged but not actually emailed. When SMTP / Databricks notification
+    # delivery is added, each entry should be a user email or a group name
+    # that the backend can resolve.
     notification_recipients:
-      - "your.email@company.com"
+      - "alice.smith@company.com"
+      - "team-leads@company.com"

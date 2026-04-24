@@ -9,14 +9,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from devmirror.settings import load_settings
+from devmirror.settings import SettingsError, load_settings
 from devmirror.utils.db_client import DbClient
 
-from .repository import ConfigRepository
 from .router import router
 from .router_stage2 import router_stage2
 from .tasks import TaskTracker
@@ -71,22 +69,24 @@ async def _background_cleanup_loop(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan: initialise DbClient, TaskTracker, and bootstrap DDL."""
-    settings = load_settings()
-    db_client = DbClient()
+    """Application lifespan: initialise DbClient, TaskTracker.
 
-    repo = ConfigRepository(settings.control_fqn_prefix)
+    DDL bootstrapping (ensure_table) is deferred to the first request that
+    touches the repository, keeping startup fast and avoiding a blocking SQL
+    warehouse call during cold start.
+    """
     try:
-        repo.ensure_table(db_client)
-        logger.info("devmirror_configs table ensured at %s", repo.table_fqn)
-    except Exception:
-        logger.warning("Could not bootstrap devmirror_configs table", exc_info=True)
-
+        settings = load_settings()
+    except SettingsError as exc:
+        logger.critical("DevMirror startup aborted: %s", exc)
+        raise
+    db_client = DbClient()
     task_tracker = TaskTracker()
 
     app.state.db_client = db_client
     app.state.settings = settings
     app.state.task_tracker = task_tracker
+    app.state.table_ensured = False
 
     # Start background cleanup loop
     cleanup_task = asyncio.create_task(_background_cleanup_loop(app))
@@ -94,22 +94,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Graceful shutdown: drain running tasks (SIGTERM gives 15s)
+        logger.info("Shutting down: draining background tasks")
+        task_tracker.wait_for_running(timeout=10.0)
         cleanup_task.cancel()
         try:
             await cleanup_task
         except asyncio.CancelledError:
             pass
+        logger.info("Shutdown complete")
 
 
 app = FastAPI(title="DevMirror", version="0.1.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # API routes (must be registered BEFORE the static file mount)
 app.include_router(router, prefix="/api")

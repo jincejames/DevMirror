@@ -23,14 +23,30 @@ class TestCreateConfig:
         assert data["dr_id"] == "DR-1042"
         assert data["status"] == "valid"
 
-    def test_create_invalid_dr_id(self, client, mock_db):
-        payload = valid_config_payload(dr_id="INVALID")
-        mock_db.sql.return_value = [make_db_row(dr_id="INVALID", status="invalid")]
+    def test_create_rejects_supplied_dr_id(self, client, mock_db):
+        """US-34 AC4: callers cannot supply dr_id -- server must return 400
+        with detail ``DR ID is auto-generated; do not supply``.
+        """
+        payload = valid_config_payload(dr_id="DR-9999")
+
+        resp = client.post("/api/configs", json=payload)
+        assert resp.status_code == 400
+        # The detail must include the exact phrasing required by the spec
+        # so the UI / API clients can surface a consistent message.
+        assert resp.json()["detail"] == "DR ID is auto-generated; do not supply"
+
+    def test_create_uses_server_assigned_dr_id(self, client, mock_db, monkeypatch):
+        """US-34: the server-generated dr_id is returned in the response."""
+        from devmirror.utils import id_generator as idg
+
+        monkeypatch.setattr(idg, "next_dr_id", lambda db_client, settings: "DR00007")
+        payload = valid_config_payload()  # no dr_id supplied
+        mock_db.sql.return_value = [make_db_row(dr_id="DR00007")]
 
         resp = client.post("/api/configs", json=payload)
         assert resp.status_code == 201
         data = resp.json()
-        assert data["status"] == "invalid"
+        assert data["dr_id"] == "DR00007"
 
     def test_create_with_empty_streams_422(self, client, mock_db):
         payload = valid_config_payload(streams=[])

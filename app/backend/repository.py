@@ -5,15 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from devmirror.utils.sql_executor import escape_sql_string as _escape
-
 if TYPE_CHECKING:
     from devmirror.utils.db_client import DbClient
 
 
-def _sql_val(v: Any) -> str:
-    """Format a value for SQL: NULL if None, else escaped string literal."""
-    return "NULL" if v is None else f"'{_escape(str(v))}'"
+def _param_or_null(params: dict, key: str, value: str | None) -> str:
+    """Return :key placeholder if value is non-None, else literal NULL."""
+    if value is None:
+        return "NULL"
+    params[key] = value
+    return f":{key}"
 
 
 class ConfigRepository:
@@ -59,17 +60,27 @@ class ConfigRepository:
     ) -> None:
         """Insert a new config row."""
         now = datetime.now(UTC).isoformat()
+        params: dict[str, str] = {}
+        desc_expr = _param_or_null(params, "description", description)
+        params.update({
+            "dr_id": dr_id,
+            "config_json": config_json,
+            "config_yaml": config_yaml,
+            "status": status,
+            "validation_errors": validation_errors,
+            "created_at": now,
+            "created_by": created_by,
+            "expiration_date": expiration_date,
+        })
         sql = (
             f"INSERT INTO {self._table} "
-            f"(dr_id, config_json, config_yaml, status, validation_errors, "
-            f"created_at, created_by, updated_at, expiration_date, description) "
-            f"VALUES ("
-            f"'{_escape(dr_id)}', '{_escape(config_json)}', '{_escape(config_yaml)}', "
-            f"'{_escape(status)}', '{_escape(validation_errors)}', "
-            f"'{_escape(now)}', '{_escape(created_by)}', NULL, "
-            f"'{_escape(expiration_date)}', {_sql_val(description)})"
+            "(dr_id, config_json, config_yaml, status, validation_errors, "
+            "created_at, created_by, updated_at, expiration_date, description) "
+            "VALUES ("
+            ":dr_id, :config_json, :config_yaml, :status, :validation_errors, "
+            f":created_at, :created_by, NULL, :expiration_date, {desc_expr})"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, params)
 
     def update(
         self,
@@ -85,23 +96,34 @@ class ConfigRepository:
     ) -> None:
         """Update an existing config row."""
         now = datetime.now(UTC).isoformat()
+        params: dict[str, str] = {}
+        desc_expr = _param_or_null(params, "description", description)
+        params.update({
+            "dr_id": dr_id,
+            "config_json": config_json,
+            "config_yaml": config_yaml,
+            "status": status,
+            "validation_errors": validation_errors,
+            "updated_at": now,
+            "expiration_date": expiration_date,
+        })
         sql = (
             f"UPDATE {self._table} SET "
-            f"config_json = '{_escape(config_json)}', "
-            f"config_yaml = '{_escape(config_yaml)}', "
-            f"status = '{_escape(status)}', "
-            f"validation_errors = '{_escape(validation_errors)}', "
-            f"updated_at = '{_escape(now)}', "
-            f"expiration_date = '{_escape(expiration_date)}', "
-            f"description = {_sql_val(description)} "
-            f"WHERE dr_id = '{_escape(dr_id)}'"
+            "config_json = :config_json, "
+            "config_yaml = :config_yaml, "
+            "status = :status, "
+            "validation_errors = :validation_errors, "
+            "updated_at = :updated_at, "
+            "expiration_date = :expiration_date, "
+            f"description = {desc_expr} "
+            "WHERE dr_id = :dr_id"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, params)
 
     def get(self, db_client: DbClient, *, dr_id: str) -> dict[str, Any] | None:
         """Fetch a single config row by dr_id, or None if not found."""
-        sql = f"SELECT * FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        rows = db_client.sql(sql)
+        sql = f"SELECT * FROM {self._table} WHERE dr_id = :dr_id"
+        rows = db_client.sql_with_params(sql, {"dr_id": dr_id})
         return rows[0] if rows else None
 
     def list_all(self, db_client: DbClient) -> list[dict[str, Any]]:
@@ -120,11 +142,11 @@ class ConfigRepository:
         now = datetime.now(UTC).isoformat()
         sql = (
             f"UPDATE {self._table} SET "
-            f"status = '{_escape(status)}', "
-            f"updated_at = '{_escape(now)}' "
-            f"WHERE dr_id = '{_escape(dr_id)}'"
+            "status = :status, "
+            "updated_at = :updated_at "
+            "WHERE dr_id = :dr_id"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, {"dr_id": dr_id, "status": status, "updated_at": now})
 
     def update_manifest(
         self,
@@ -138,12 +160,15 @@ class ConfigRepository:
         now = datetime.now(UTC).isoformat()
         sql = (
             f"UPDATE {self._table} SET "
-            f"manifest_json = '{_escape(manifest_json)}', "
-            f"scanned_at = '{_escape(scanned_at)}', "
-            f"updated_at = '{_escape(now)}' "
-            f"WHERE dr_id = '{_escape(dr_id)}'"
+            "manifest_json = :manifest_json, "
+            "scanned_at = :scanned_at, "
+            "updated_at = :updated_at "
+            "WHERE dr_id = :dr_id"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, {
+            "dr_id": dr_id, "manifest_json": manifest_json,
+            "scanned_at": scanned_at, "updated_at": now,
+        })
 
     def get_manifest(
         self,
@@ -172,6 +197,6 @@ class ConfigRepository:
             return False
         if existing.get("status") == "provisioned":
             return False
-        sql = f"DELETE FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        db_client.sql_exec(sql)
+        sql = f"DELETE FROM {self._table} WHERE dr_id = :dr_id"
+        db_client.sql_exec_with_params(sql, {"dr_id": dr_id})
         return True

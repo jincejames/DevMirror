@@ -451,5 +451,19 @@ input[type='radio'] { margin-right: 0.375rem; }
   margin-bottom: 1rem;
 }
 
+/* Auto-generated DR ID display on the config form (US-34) */
+.dr-id-display {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+  letter-spacing: 0.02em;
+}
+
 /* Utility */
 .error-text { color: #dc2626; }

@@ -12,6 +12,12 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 DR_ID_PATTERN = re.compile(r"^DR-[0-9]+$")
 
+# Stage 4: the auto-generated format is ``<PREFIX><zero-padded-counter>``.
+# Accept any single-letter-start prefix of up to 8 chars followed by 3-12
+# digits so reads work regardless of how DEVMIRROR_DR_ID_PREFIX /
+# DEVMIRROR_DR_ID_PADDING are configured for this deployment.
+NEW_DR_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,7}[0-9]{3,12}$")
+
 
 class StreamRef(BaseModel):
     """A reference to a production Databricks Workflow or Pipeline."""
@@ -68,7 +74,17 @@ class DataRevision(BaseModel):
 
 
 class Access(BaseModel):
-    """Access control: who gets access to dev and qa environments."""
+    """Access control: who gets access to dev and qa environments.
+
+    Each entry in ``developers`` and ``qa_users`` may be:
+      - a user email (``alice@company.com``),
+      - a Databricks account group name (``data-engineers``), or
+      - a service principal application ID (UUID).
+
+    The string is passed unchanged to ``WorkspaceClient().grants.update()`` and
+    resolved server-side, so mixing users, groups, and service principals in
+    the same list is supported.
+    """
 
     developers: list[str] = Field(..., min_length=1)
     qa_users: list[str] | None = None
@@ -83,7 +99,14 @@ class Access(BaseModel):
 
 
 class Lifecycle(BaseModel):
-    """Lifecycle configuration: expiration and notification settings."""
+    """Lifecycle configuration: expiration and notification settings.
+
+    ``notification_recipients`` is passed to the notifier backend as-is.  The
+    only backend shipped today is ``LoggingBackend`` (see
+    ``devmirror/cleanup/notifier.py``), which simply logs the notification.
+    When an SMTP or Databricks notification backend is added, each entry
+    should be a user email or a group name that the backend can resolve.
+    """
 
     expiration_date: date
     notification_days_before: int = Field(default=7, ge=0)
@@ -117,9 +140,12 @@ class DevelopmentRequest(BaseModel):
     @field_validator("dr_id")
     @classmethod
     def _validate_dr_id(cls, v: str) -> str:
-        if not DR_ID_PATTERN.match(v):
+        if not (DR_ID_PATTERN.match(v) or NEW_DR_ID_PATTERN.match(v)):
             raise ValueError(
-                f"dr_id must match pattern DR-<digits> (e.g. 'DR-1042'), got: {v!r}"
+                "dr_id must match either legacy pattern DR-<digits> "
+                "(e.g. 'DR-1042') or the auto-generated pattern "
+                "<PREFIX><zero-padded-digits> (e.g. 'DR00042'), "
+                f"got: {v!r}"
             )
         return v
 

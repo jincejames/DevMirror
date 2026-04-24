@@ -13,6 +13,9 @@ def mock_db():
     db = MagicMock()
     db.sql.return_value = []
     db.sql_exec.return_value = None
+    db.sql_exec_with_params.return_value = None
+    # Wire sql_with_params to delegate to sql so return_value/side_effect work
+    db.sql_with_params.side_effect = lambda stmt, params: db.sql(stmt, params)
     return db
 
 
@@ -35,13 +38,14 @@ class TestInsert:
             description="Test config",
         )
 
-        mock_db.sql_exec.assert_called_once()
-        sql = mock_db.sql_exec.call_args[0][0]
+        mock_db.sql_exec_with_params.assert_called_once()
+        sql = mock_db.sql_exec_with_params.call_args[0][0]
+        params = mock_db.sql_exec_with_params.call_args[0][1]
         assert "INSERT INTO test_catalog.test_schema.devmirror_configs" in sql
-        assert "DR-100" in sql
-        assert "user@example.com" in sql
-        assert "2026-05-01" in sql
-        assert "Test config" in sql
+        assert params["dr_id"] == "DR-100"
+        assert params["created_by"] == "user@example.com"
+        assert params["expiration_date"] == "2026-05-01"
+        assert params["description"] == "Test config"
 
     def test_insert_null_description(self, repo, mock_db):
         repo.insert(
@@ -56,8 +60,10 @@ class TestInsert:
             description=None,
         )
 
-        sql = mock_db.sql_exec.call_args[0][0]
+        sql = mock_db.sql_exec_with_params.call_args[0][0]
+        params = mock_db.sql_exec_with_params.call_args[0][1]
         assert "NULL" in sql
+        assert "description" not in params
 
 
 class TestGet:
@@ -76,8 +82,11 @@ class TestGet:
         assert result is not None
         assert result["dr_id"] == "DR-100"
 
-        sql = mock_db.sql.call_args[0][0]
-        assert "WHERE dr_id = 'DR-100'" in sql
+        mock_db.sql_with_params.assert_called_once()
+        sql = mock_db.sql_with_params.call_args[0][0]
+        params = mock_db.sql_with_params.call_args[0][1]
+        assert "WHERE dr_id = :dr_id" in sql
+        assert params["dr_id"] == "DR-100"
 
     def test_get_returns_none_when_not_found(self, repo, mock_db):
         mock_db.sql.return_value = []
@@ -111,10 +120,12 @@ class TestUpdate:
             description="Updated",
         )
 
-        sql = mock_db.sql_exec.call_args[0][0]
+        sql = mock_db.sql_exec_with_params.call_args[0][0]
+        params = mock_db.sql_exec_with_params.call_args[0][1]
         assert "UPDATE test_catalog.test_schema.devmirror_configs" in sql
-        assert "WHERE dr_id = 'DR-100'" in sql
-        assert "Updated" in sql
+        assert "WHERE dr_id = :dr_id" in sql
+        assert params["dr_id"] == "DR-100"
+        assert params["description"] == "Updated"
 
 
 class TestDelete:
@@ -122,17 +133,17 @@ class TestDelete:
         mock_db.sql.return_value = [{"dr_id": "DR-100", "status": "valid"}]
         result = repo.delete(mock_db, dr_id="DR-100")
         assert result is True
-        # sql called for get + sql_exec for delete
-        mock_db.sql_exec.assert_called_once()
+        # sql_with_params called for get + sql_exec_with_params for delete
+        mock_db.sql_exec_with_params.assert_called_once()
 
     def test_delete_blocked_when_provisioned(self, repo, mock_db):
         mock_db.sql.return_value = [{"dr_id": "DR-100", "status": "provisioned"}]
         result = repo.delete(mock_db, dr_id="DR-100")
         assert result is False
-        mock_db.sql_exec.assert_not_called()
+        mock_db.sql_exec_with_params.assert_not_called()
 
     def test_delete_returns_false_when_not_found(self, repo, mock_db):
         mock_db.sql.return_value = []
         result = repo.delete(mock_db, dr_id="DR-999")
         assert result is False
-        mock_db.sql_exec.assert_not_called()
+        mock_db.sql_exec_with_params.assert_not_called()

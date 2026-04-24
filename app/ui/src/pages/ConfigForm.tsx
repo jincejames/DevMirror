@@ -15,8 +15,10 @@ import StreamSearch from '../components/StreamSearch';
 import ValidationBanner from '../components/ValidationBanner';
 import { useUser } from '../UserContext';
 
+// US-34: dr_id is assigned server-side on create; the field is not on
+// the form.  When editing we overwrite EMPTY_FORM with the fetched config
+// (which includes the already-assigned dr_id).
 const EMPTY_FORM: ConfigIn = {
-  dr_id: '',
   description: '',
   streams: [],
   additional_objects: [],
@@ -113,6 +115,11 @@ export default function ConfigForm() {
             : null,
       };
 
+      // US-34: never send dr_id on create -- the server rejects supplied IDs.
+      if (!isEdit) {
+        delete payload.dr_id;
+      }
+
       const out = isEdit && drId
         ? await updateConfig(drId, payload)
         : await createConfig(payload);
@@ -127,7 +134,13 @@ export default function ConfigForm() {
           setIsValid(true);
           setShowBanner(true);
         } else if (role === 'user') {
-          // Non-admin: show pending review banner instead of navigating away
+          // Non-admin: show pending review banner instead of navigating away.
+          // US-34: on a fresh create, jump to the edit route so the
+          // server-assigned dr_id is visible in both URL and page title.
+          if (!isEdit && out.dr_id) {
+            navigate(`/config/${out.dr_id}`, { replace: true });
+            return;
+          }
           setStatus(out.status);
           setErrors(out.validation_errors);
           setIsValid(true);
@@ -285,24 +298,18 @@ export default function ConfigForm() {
       )}
 
       <form onSubmit={handleSubmit}>
-        {/* Section 1: Basic Info */}
+        {/* Section 1: Basic Info
+            US-34: the DR ID field is intentionally absent on create; the
+            server assigns one, and the page title shows it when editing. */}
         <fieldset className="form-section">
           <legend>Basic Info</legend>
-          <div className="form-field">
-            <label htmlFor="dr_id">DR ID</label>
-            <input
-              id="dr_id"
-              type="text"
-              value={form.dr_id}
-              onChange={(e) => set('dr_id', e.target.value)}
-              placeholder="DR-1234"
-              required
-              disabled={isEdit}
-              className={fieldClass('dr_id')}
-            />
-            {fieldError('dr_id') && <span className="field-error-msg">{fieldError('dr_id')}</span>}
-            <small>Pattern: DR-1234</small>
-          </div>
+          {isEdit && drId && (
+            <div className="form-field">
+              <label>DR ID</label>
+              <div className="dr-id-display">{drId}</div>
+              <small>Auto-generated at creation time.</small>
+            </div>
+          )}
           <div className="form-field">
             <label htmlFor="description">Description</label>
             <textarea
@@ -401,7 +408,7 @@ export default function ConfigForm() {
             <MultiInput
               values={form.developers}
               onChange={(val) => set('developers', val)}
-              placeholder="user@example.com"
+              placeholder="user@example.com or group-name"
               required
               disabled={false}
             />
@@ -413,7 +420,7 @@ export default function ConfigForm() {
               <MultiInput
                 values={form.qa_users ?? []}
                 onChange={(val) => set('qa_users', val)}
-                placeholder="qa-user@example.com"
+                placeholder="qa-user@example.com or group-name"
                 disabled={false}
               />
               {fieldError('qa_users') && <span className="field-error-msg">{fieldError('qa_users')}</span>}

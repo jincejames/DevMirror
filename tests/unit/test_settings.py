@@ -38,6 +38,19 @@ class TestLoadSettingsHappy:
         assert s.shallow_clone_threshold_gb == 50
         assert s.audit_retention_days == 365
         assert s.lineage_system_table == "system.access.table_lineage"
+        # Stage 4 US-34: defaults for auto-generated DR IDs.
+        assert s.dr_id_prefix == "DR"
+        assert s.dr_id_padding == 5
+
+    def test_dr_id_env_overrides(self) -> None:
+        env = _env(
+            DEVMIRROR_DR_ID_PREFIX="PROJ",
+            DEVMIRROR_DR_ID_PADDING="6",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            s = load_settings()
+        assert s.dr_id_prefix == "PROJ"
+        assert s.dr_id_padding == 6
 
     def test_with_warehouse_id(self) -> None:
         with patch.dict(os.environ, {"DEVMIRROR_WAREHOUSE_ID": "wh-test-123"}, clear=True):
@@ -102,6 +115,96 @@ class TestLoadSettingsErrors:
 
     def test_non_integer_max_parallel(self) -> None:
         env = _env(DEVMIRROR_MAX_PARALLEL_CLONES="abc")
+        with patch.dict(os.environ, env, clear=True), pytest.raises(
+            SettingsError, match="must be an integer"
+        ):
+            load_settings()
+
+
+# ===========================================================================
+# Stage 4 US-35: DR ID prefix / padding validation
+# ===========================================================================
+
+class TestDrIdPrefixValidation:
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "DR",           # default
+            "A",            # single letter is allowed
+            "PROJ",
+            "Ab1",          # mixed case + digits
+            "abcdefgh",     # max 8 characters
+            "Z9",
+            # US-35 extra boundary / coverage cases:
+            "AB345678",     # exact 8-char boundary with digits + uppercase
+            "dr",           # lowercase-only (regex allows [A-Za-z])
+            "d",            # lowercase single letter
+            "aA1",          # lowercase + uppercase + digit
+        ],
+    )
+    def test_valid_prefix(self, prefix: str) -> None:
+        env = _env(DEVMIRROR_DR_ID_PREFIX=prefix)
+        with patch.dict(os.environ, env, clear=True):
+            s = load_settings()
+        assert s.dr_id_prefix == prefix
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "1bad",          # must start with a letter
+            "9DR",           # starts with a digit
+            "",              # explicitly blank (distinct from unset)
+            "   ",           # whitespace-only is also blank after strip
+            "DR-1",          # hyphen is not alphanumeric
+            "DR_1",          # underscore is not alphanumeric
+            "DR 1",          # space is not alphanumeric
+            "abcdefghi",     # 9 characters exceeds max of 8
+            "LONGPREFIX",    # 10 characters exceeds max of 8
+            # US-35 extra boundary / coverage cases:
+            "ABC456789",     # exact 9-char boundary (one over max)
+            "DRé",     # non-ASCII letter (unicode) is not permitted
+            "éDR",     # starts with a non-ASCII letter
+            "DR!",           # punctuation other than alnum
+            "DR.1",          # dot is not alphanumeric
+        ],
+    )
+    def test_invalid_prefix_raises(self, prefix: str) -> None:
+        env = _env(DEVMIRROR_DR_ID_PREFIX=prefix)
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(
+                SettingsError,
+                match=r"DEVMIRROR_DR_ID_PREFIX must be alphanumeric",
+            ):
+                load_settings()
+
+    def test_unset_prefix_falls_back_to_default(self) -> None:
+        """When DEVMIRROR_DR_ID_PREFIX is not set at all, default 'DR' is used."""
+        env = _env()
+        env.pop("DEVMIRROR_DR_ID_PREFIX", None)
+        with patch.dict(os.environ, env, clear=True):
+            s = load_settings()
+            assert s.dr_id_prefix == "DR"
+
+
+class TestDrIdPaddingValidation:
+    @pytest.mark.parametrize("padding", [3, 4, 5, 6, 10, 12])
+    def test_valid_padding(self, padding: int) -> None:
+        env = _env(DEVMIRROR_DR_ID_PADDING=str(padding))
+        with patch.dict(os.environ, env, clear=True):
+            s = load_settings()
+        assert s.dr_id_padding == padding
+
+    @pytest.mark.parametrize("padding", [0, 1, 2, 13, 20, 99, -1])
+    def test_out_of_range_padding_raises(self, padding: int) -> None:
+        env = _env(DEVMIRROR_DR_ID_PADDING=str(padding))
+        with patch.dict(os.environ, env, clear=True), pytest.raises(
+            SettingsError,
+            match=r"DEVMIRROR_DR_ID_PADDING must be between 3 and 12 inclusive",
+        ):
+            load_settings()
+
+    def test_non_integer_padding_raises(self) -> None:
+        env = _env(DEVMIRROR_DR_ID_PADDING="not-a-number")
         with patch.dict(os.environ, env, clear=True), pytest.raises(
             SettingsError, match="must be an integer"
         ):

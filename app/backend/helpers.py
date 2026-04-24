@@ -30,8 +30,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _get_repo(settings: Settings) -> ConfigRepository:
-    return ConfigRepository(settings.control_fqn_prefix)
+_table_ensured = False
+
+
+def _get_repo(settings: Settings, db_client: DbClient | None = None) -> ConfigRepository:
+    """Return a ConfigRepository, bootstrapping the table on first call."""
+    global _table_ensured  # noqa: PLW0603
+    repo = ConfigRepository(settings.control_fqn_prefix)
+    if not _table_ensured and db_client is not None:
+        try:
+            repo.ensure_table(db_client)
+            logger.info("devmirror_configs table ensured at %s", repo.table_fqn)
+        except Exception:
+            logger.warning("Could not bootstrap devmirror_configs table", exc_info=True)
+        _table_ensured = True
+    return repo
 
 
 @contextmanager

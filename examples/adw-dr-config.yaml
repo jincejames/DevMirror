@@ -1,0 +1,89 @@
+# =============================================================================
+# DevMirror DR Config -- ADW (sub-project) with B2B cross-references
+# =============================================================================
+
+
+version: "1.0"
+
+development_request:
+  dr_id: "DR-2001"
+  description: "ADW feature branch: clone IMP_BEACH_RESULT + IMP_TARIS pipelines into dev for Q2 transformation work. Includes cross-project B2B reference tables for end-to-end testing against Tiger AIP / SEAL lounge data."
+
+  # ADW pipelines / jobs to resolve and clone
+  streams:
+    - name: "IMP_BEACH_RESULT"
+    - name: "IMP_TARIS"
+
+  # B2B cross-project reference tables needed for end-to-end tests.
+  # These are not downstream of the ADW streams above, so they must be
+  # explicitly listed as additional_objects. All are 3-part FQNs rooted
+  # at the prod B2B catalog (odp_adw_b2b_p).
+  additional_objects:
+    # ---- DB_CORPORATE: AIP contract & incentive reference data ----
+    - "odp_adw_b2b_p.db_corporate.aip_capping_info"
+    - "odp_adw_b2b_p.db_corporate.aip_contract_info"
+    - "odp_adw_b2b_p.db_corporate.aip_coupon_contract"
+    - "odp_adw_b2b_p.db_corporate.aip_incentive_grid"
+    - "odp_adw_b2b_p.db_corporate.aip_participating_carrier"
+    - "odp_adw_b2b_p.db_corporate.aip_participating_customer"
+    - "odp_adw_b2b_p.db_corporate.aip_revenue_and_incentive_calc"
+    - "odp_adw_b2b_p.db_corporate.seal_lounge_vouchers"
+    - "odp_adw_b2b_p.db_corporate.udh_log_transactions"
+
+    # ---- DB_TRANS_IMPORTS: staging tables populated by B2B streams ----
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_header"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_capping_info"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_contract_info"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_coupon_contract"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_incentive_grid"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_participating_carrier"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_participating_customer"
+    - "odp_adw_b2b_p.db_trans_imports.tgraip_revenue_and_incentive_calc"
+    - "odp_adw_b2b_p.db_trans_imports.seal_lounge_vouchers_conv"
+
+  environments:
+    dev:
+      enabled: true
+    # QA environment -- uncomment `enabled: true` and populate access.qa_users
+    # below to provision a QA clone alongside dev.
+    qa:
+      enabled: false
+
+  # ADW uses time-aligned snapshots for reproducibility during feature work.
+  # The three modes are mutually exclusive -- pick one.
+  data_revision:
+    # ACTIVE: clone the latest committed state of all source tables.
+    mode: "latest"
+
+    # ALTERNATIVE -- clone at a specific Delta version (all tables share
+    # the same version number at clone time).
+    # mode: "version"
+    # version: 42
+
+    # ALTERNATIVE -- clone at a specific point in time (ISO 8601 UTC).
+    # Useful for reproducing a known-good prod state during bug reproduction.
+    # mode: "timestamp"
+    # timestamp: "2026-04-01T00:00:00Z"
+
+  access:
+    # ADW conversion engineers who need dev catalog access.
+    # Entries can be user emails OR Databricks account group names --
+    # both are passed through to the grants API unchanged.
+    developers:
+      - "harshvardhan.mokala.sp@dlh.de"
+      - "jince.james@databricks.com"
+      # - "odp-adw-developers"   # account group (uncomment if the group exists)
+
+    # qa_users is ignored because environments.qa.enabled is false above.
+    # Uncomment the list AND flip qa.enabled to true to enable QA access.
+    # qa_users:
+    #   - "adw-qa-lead@dlh.de"
+    #   - "adw-qa-engineer@dlh.de"
+
+  lifecycle:
+    # Must be in the future and within 90 days of today.
+    expiration_date: "2026-07-15"
+    notification_days_before: 7
+    notification_recipients:
+      - "harshvardhan.mokala.sp@dlh.de"
+      - "jince.james@databricks.com"

@@ -60,7 +60,7 @@ def scan_config(
     role: str = Depends(get_user_role),
 ) -> ScanResponse:
     """Trigger an object discovery scan for a saved config."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -109,7 +109,7 @@ def get_manifest(
     role: str = Depends(get_user_role),
 ) -> ManifestResponse:
     """Retrieve the stored scan manifest for review."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
 
     # Ownership check: fetch the config row to verify created_by
     row = repo.get(db_client, dr_id=dr_id)
@@ -147,7 +147,7 @@ def update_manifest(
     role: str = Depends(get_user_role),
 ) -> ManifestResponse:
     """Save a modified manifest after human review."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -197,7 +197,7 @@ def provision_config(
     """Start provisioning of dev/qa objects from an approved manifest."""
     from devmirror.provision.runner import provision_dr
 
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -519,7 +519,7 @@ def reprovision_dr_endpoint(
     dr_repo, obj_repo, access_repo, audit_repo = _control_repos(settings)
 
     # 1. Get config from devmirror_configs table
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")

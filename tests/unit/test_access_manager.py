@@ -9,6 +9,7 @@ import pytest
 from devmirror.provision.access_manager import (
     AccessGrantResult,
     AccessManagerError,
+    _validate_principal,
     apply_grants,
     apply_revokes,
     generate_grant_statements,
@@ -16,6 +17,52 @@ from devmirror.provision.access_manager import (
     grant_schema_usage_sql,
     revoke_schema_sql,
 )
+
+# ===================================================================
+# Principal validation -- users, groups, and service principals
+# ===================================================================
+
+
+class TestValidatePrincipal:
+    """Locks in that _validate_principal accepts users, groups, and SPs."""
+
+    @pytest.mark.parametrize(
+        "principal",
+        [
+            "alice@company.com",              # user email
+            "alice.smith@example.co.uk",      # user email with dotted local + TLD
+            "data-engineers",                 # account group (hyphen)
+            "data_engineers",                 # account group (underscore)
+            "eng.analytics",                  # account group (dot)
+            "odp-adw-developers",             # realistic hyphenated group name
+            "12345678-1234-1234-1234-123456789abc",  # service principal UUID
+        ],
+    )
+    def test_accepts_valid_principal(self, principal: str) -> None:
+        # Should not raise.
+        _validate_principal(principal)
+
+    @pytest.mark.parametrize(
+        "principal",
+        [
+            "data engineers",                 # space
+            "user; DROP TABLE--",             # SQL injection
+            "user#admin",                     # disallowed char
+            "",                               # empty
+        ],
+    )
+    def test_rejects_invalid_principal(self, principal: str) -> None:
+        with pytest.raises(AccessManagerError, match="Unsafe principal"):
+            _validate_principal(principal)
+
+    def test_error_message_mentions_group_and_service_principal(self) -> None:
+        """The error message must surface group + SP support so users discover it."""
+        with pytest.raises(AccessManagerError) as exc_info:
+            _validate_principal("bad name with spaces")
+        msg = str(exc_info.value)
+        assert "group" in msg.lower()
+        assert "service principal" in msg.lower()
+
 
 # ===================================================================
 # Grant SQL generation

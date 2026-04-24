@@ -66,17 +66,36 @@ def create_config(
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
 ) -> ConfigOut:
-    """Create a new DevMirror config."""
+    """Create a new DevMirror config.
+
+    US-34: the server assigns the DR ID.  A caller that supplies ``dr_id``
+    is rejected with HTTP 400; the allocated ID is returned in the
+    response body (and shows up in the client-side URL thereafter).
+    """
+    # US-34 acceptance criterion 4: reject caller-supplied dr_id.
+    if config_in.dr_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="DR ID is auto-generated; do not supply",
+        )
+
+    # Allocate the next ID before any validation so that
+    # ``_validate_config`` / ``to_devmirror_config`` see a concrete value.
+    from devmirror.utils.id_generator import next_dr_id
+
+    generated_id = next_dr_id(db_client, settings)
+    config_in.dr_id = generated_id
+
     status, all_errors, _dm_config = _validate_config(config_in)
 
     config_json = config_in.model_dump_json()
     config_yaml = _build_yaml(config_in)
     errors_json = json.dumps([e.model_dump() for e in all_errors])
 
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     repo.insert(
         db_client,
-        dr_id=config_in.dr_id,
+        dr_id=generated_id,
         config_json=config_json,
         config_yaml=config_yaml,
         status=status,
@@ -88,9 +107,9 @@ def create_config(
 
     # Auto-scan if config is valid
     if status == "valid" and _dm_config is not None:
-        _auto_scan(db_client, settings, config_in, _dm_config, repo, config_in.dr_id)
+        _auto_scan(db_client, settings, config_in, _dm_config, repo, generated_id)
 
-    row = repo.get(db_client, dr_id=config_in.dr_id)
+    row = repo.get(db_client, dr_id=generated_id)
     if row is None:
         raise HTTPException(status_code=500, detail="Failed to read back created config")
     return _row_to_config_out(row)
@@ -110,7 +129,7 @@ def list_configs(
     role: str = Depends(get_user_role),
 ) -> ConfigListResponse:
     """List all DevMirror configs."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     rows = repo.list_all(db_client)
     if role != "admin":
         rows = [r for r in rows if r.get("created_by") == current_user]
@@ -133,7 +152,7 @@ def get_config(
     role: str = Depends(get_user_role),
 ) -> ConfigOut:
     """Get a single DevMirror config by DR ID."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -157,7 +176,7 @@ def update_config(
     role: str = Depends(get_user_role),
 ) -> ConfigOut:
     """Update an existing DevMirror config."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     existing = repo.get(db_client, dr_id=dr_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -210,7 +229,7 @@ def delete_config(
     role: str = Depends(get_user_role),
 ) -> Response:
     """Delete a DevMirror config."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     existing = repo.get(db_client, dr_id=dr_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -239,7 +258,7 @@ def revalidate_config(
     role: str = Depends(get_user_role),
 ) -> ValidationResult:
     """Re-validate an existing config and update its status/errors."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
@@ -278,7 +297,7 @@ def export_config_yaml(
     role: str = Depends(get_user_role),
 ) -> Response:
     """Export config as a downloadable YAML file."""
-    repo = _get_repo(settings)
+    repo = _get_repo(settings, db_client)
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")

@@ -18,9 +18,15 @@ from devmirror.config.schema import (
 
 
 class ConfigIn(BaseModel):
-    """Flat form input that maps to a nested DevMirrorConfig."""
+    """Flat form input that maps to a nested DevMirrorConfig.
 
-    dr_id: str
+    ``dr_id`` is intentionally optional on the input model: the server
+    assigns it at ``POST /api/configs`` time (see Stage 4 US-34).  It is
+    populated before :meth:`to_devmirror_config` is called, so the nested
+    ``DevelopmentRequest`` still carries a concrete value.
+    """
+
+    dr_id: str | None = None
     description: str | None = None
     streams: list[str]
     additional_objects: list[str] | None = None
@@ -50,7 +56,13 @@ class ConfigIn(BaseModel):
         return v
 
     def to_devmirror_config(self) -> DevMirrorConfig:
-        """Convert flat form fields into a nested DevMirrorConfig."""
+        """Convert flat form fields into a nested DevMirrorConfig.
+
+        ``self.dr_id`` must be non-None by the time this is called -- the
+        server-side auto-ID layer injects it before validation.  Passing a
+        ``ConfigIn`` with no ``dr_id`` raises a :class:`ValidationError`
+        via the nested ``DevelopmentRequest`` model.
+        """
         stream_refs = [StreamRef(name=s) for s in self.streams]
 
         qa_env = EnvironmentQA(enabled=True) if self.qa_enabled else EnvironmentQA(enabled=False)

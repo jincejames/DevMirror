@@ -7,7 +7,8 @@ export interface UserInfo {
 }
 
 export interface ConfigIn {
-  dr_id: string;
+  // US-34: dr_id is server-assigned on create; optional in client payloads.
+  dr_id?: string | null;
   description?: string | null;
   streams: string[];
   additional_objects?: string[] | null;

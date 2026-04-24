@@ -21,8 +21,13 @@ def future_date(days: int = 30) -> str:
 
 
 def valid_config_payload(**overrides) -> dict:
+    """Build a minimal valid ConfigIn payload.
+
+    By default ``dr_id`` is NOT included (US-34: the server auto-assigns
+    it on create).  Callers that need a specific dr_id (e.g. PUT tests
+    reading from ``make_db_row``) can pass it explicitly as an override.
+    """
     defaults = {
-        "dr_id": "DR-1042",
         "streams": ["my-job-1"],
         "developers": ["dev@example.com"],
         "expiration_date": future_date(30),
@@ -122,7 +127,34 @@ def mock_refresh_result(mode="incremental"):
 
 @pytest.fixture()
 def mock_db():
-    return MagicMock()
+    db = MagicMock()
+    # Wire sql_with_params to delegate to sql so that tests setting
+    # mock_db.sql.return_value / side_effect still work after the
+    # repository switched from sql() to sql_with_params().
+    db.sql_with_params.side_effect = lambda stmt, params: db.sql(stmt, params)
+    return db
+
+
+@pytest.fixture(autouse=True)
+def mock_next_dr_id(monkeypatch):
+    """Pin next_dr_id to ``"DR-1042"`` (legacy format) for all tests.
+
+    US-34 moved DR-ID generation server-side; existing test fixtures still
+    expect the dr_id ``"DR-1042"`` (the value baked into :func:`make_db_row`).
+    Monkey-patching the generator keeps those tests unchanged and makes the
+    create-config path deterministic without requiring the counter table.
+    """
+    from backend import router as router_module
+
+    monkeypatch.setattr(
+        router_module, "next_dr_id", lambda db_client, settings: "DR-1042", raising=False
+    )
+    # Also patch on the source module in case the router imports it lazily.
+    from devmirror.utils import id_generator as id_generator_module
+
+    monkeypatch.setattr(
+        id_generator_module, "next_dr_id", lambda db_client, settings: "DR-1042"
+    )
 
 
 @pytest.fixture()
@@ -180,6 +212,7 @@ def make_client(role: str = "admin", email: str = "testuser@example.com"):
     ``(TestClient, mock_db)`` so callers can set up DB expectations.
     """
     mock_db = MagicMock()
+    mock_db.sql_with_params.side_effect = lambda stmt, params: mock_db.sql(stmt, params)
     _settings = Settings(
         warehouse_id="test-wh",
         control_catalog="test_catalog",

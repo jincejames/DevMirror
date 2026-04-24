@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +32,7 @@ class TaskTracker:
 
     def __init__(self) -> None:
         self._tasks: dict[str, TaskStatus] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
 
     def submit(self, dr_id: str, task_type: str, fn: Callable) -> str:
@@ -47,6 +51,8 @@ class TaskTracker:
             target=self._run, args=(task_id, fn), daemon=True
         )
         thread.start()
+        with self._lock:
+            self._threads[task_id] = thread
         return task_id
 
     def _run(self, task_id: str, fn: Callable) -> None:
@@ -72,3 +78,22 @@ class TaskTracker:
     def list_for_dr(self, dr_id: str) -> list[TaskStatus]:
         """Return all tasks associated with a DR."""
         return [t for t in self._tasks.values() if t.dr_id == dr_id]
+
+    def wait_for_running(self, timeout: float = 10.0) -> None:
+        """Wait up to *timeout* seconds for running tasks to complete.
+
+        Called during graceful shutdown so in-flight provisioning threads
+        get a chance to finish before the process is killed.
+        """
+        with self._lock:
+            running = [
+                (tid, t) for tid, t in self._threads.items()
+                if t.is_alive()
+            ]
+        if not running:
+            return
+        logger.info("Waiting for %d running task(s) to finish (timeout=%ss)", len(running), timeout)
+        for tid, thread in running:
+            thread.join(timeout=timeout / max(len(running), 1))
+            if thread.is_alive():
+                logger.warning("Task %s did not finish within shutdown timeout", tid)

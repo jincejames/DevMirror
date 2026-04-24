@@ -39,6 +39,8 @@ DevMirror reads configuration from environment variables:
 | `DEVMIRROR_MAX_PARALLEL_CLONES` | No | `10` | Max concurrent clone operations |
 | `DEVMIRROR_AUDIT_RETENTION_DAYS` | No | `365` | Audit log retention in days |
 | `DEVMIRROR_LINEAGE_SYSTEM_TABLE` | No | `system.access.table_lineage` | Lineage table FQN |
+| `DEVMIRROR_DR_ID_PREFIX` | No | `DR` | DR ID prefix. Must match `^[A-Za-z][A-Za-z0-9]{0,7}$` |
+| `DEVMIRROR_DR_ID_PADDING` | No | `5` | Zero-padding width for the DR counter. Integer, `3 <= N <= 12` |
 
 Authentication to Databricks is handled by the `databricks-sdk` auth chain:
 - `DATABRICKS_HOST` + `DATABRICKS_TOKEN`

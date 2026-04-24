@@ -121,6 +121,91 @@ class DbClient:
             return
         self._execute_via_api(statement)
 
+    # ------------------------------------------------------------------
+    # Parameterized SQL execution (Statement Execution API named params)
+    # ------------------------------------------------------------------
+
+    def sql_with_params(self, statement: str, params: dict[str, str | None]) -> list[dict[str, Any]]:
+        """Execute SQL with named parameters and return rows.
+
+        Parameters use :name syntax in the SQL statement.
+        Falls back to string interpolation for spark.sql() path.
+        """
+        spark = self._get_spark()
+        if spark:
+            # spark.sql doesn't support StatementParameterListItem — use string formatting
+            # This path is only used on clusters, not in the app
+            formatted = statement
+            for k, v in params.items():
+                placeholder = f":{k}"
+                if v is None:
+                    formatted = formatted.replace(placeholder, "NULL")
+                else:
+                    safe_v = v.replace("'", "''")
+                    formatted = formatted.replace(placeholder, f"'{safe_v}'")
+            return self.sql(formatted)
+        return self._execute_via_api_params(statement, params)
+
+    def sql_exec_with_params(self, statement: str, params: dict[str, str | None]) -> None:
+        """Execute DDL/DML with named parameters (no result needed)."""
+        spark = self._get_spark()
+        if spark:
+            formatted = statement
+            for k, v in params.items():
+                placeholder = f":{k}"
+                if v is None:
+                    formatted = formatted.replace(placeholder, "NULL")
+                else:
+                    safe_v = v.replace("'", "''")
+                    formatted = formatted.replace(placeholder, f"'{safe_v}'")
+            spark.sql(formatted)
+            return
+        self._execute_via_api_params(statement, params)
+
+    def _execute_via_api_params(self, statement: str, params: dict[str, str | None]) -> list[dict[str, Any]]:
+        """Execute via Statement Execution API with named parameters."""
+        warehouse_id = os.environ.get("DEVMIRROR_WAREHOUSE_ID", "").strip()
+        if not warehouse_id:
+            raise RuntimeError(
+                "No SparkSession available and DEVMIRROR_WAREHOUSE_ID not set. "
+                "Run on a Databricks cluster or set DEVMIRROR_WAREHOUSE_ID for remote execution."
+            )
+        from databricks.sdk.service.sql import (
+            Disposition,
+            Format,
+            StatementParameterListItem,
+            StatementState,
+        )
+
+        param_list = [
+            StatementParameterListItem(name=k, value=v if v is not None else "NULL", type="STRING")
+            for k, v in params.items()
+        ]
+
+        resp = self._client.statement_execution.execute_statement(
+            statement=statement,
+            warehouse_id=warehouse_id,
+            disposition=Disposition.INLINE,
+            format=Format.JSON_ARRAY,
+            parameters=param_list if param_list else None,
+            wait_timeout="50s",
+        )
+        if resp.status and resp.status.state in (
+            StatementState.FAILED,
+            StatementState.CANCELED,
+        ):
+            err = resp.status.error.message if resp.status.error else "unknown"
+            raise RuntimeError(f"SQL failed: {err}")
+        if resp.manifest and resp.result and resp.result.data_array:
+            schema_obj = getattr(resp.manifest, "schema", resp.manifest)
+            cols = [c.name for c in (getattr(schema_obj, "columns", None) or [])]
+            if cols:
+                return [
+                    dict(zip(cols, row, strict=False))
+                    for row in resp.result.data_array
+                ]
+        return []
+
     def _get_spark(self) -> Any:
         """Get SparkSession only if running on Databricks runtime."""
         if not os.environ.get("DATABRICKS_RUNTIME_VERSION"):

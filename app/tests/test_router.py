@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from unittest.mock import MagicMock, patch
+
 from .conftest import make_db_row, valid_config_payload
 
 
@@ -265,3 +268,255 @@ class TestOwnershipChecks:
         resp = user_client.post("/api/configs", json=payload)
         assert resp.status_code == 201
         assert resp.json()["dr_id"] == "DR-1042"
+
+
+class TestUpdateProvisionedSensitiveEditStagesPending:
+    """Phase 2: PUT on a provisioned DR with sensitive-field changes
+    (access.developers, access.qa_users, additional_objects) must NOT
+    apply grants directly. Instead it stages a CONFIG_EDIT_PENDING audit
+    row and returns HTTP 202. Grants are applied only when an admin
+    approves via the approval endpoints (covered in Phase 2 tests)."""
+
+    @staticmethod
+    def _provisioned_row(developers, qa_users=None, **overrides) -> dict:
+        """Build a provisioned-status DB row with a specific access list."""
+        config = valid_config_payload(
+            dr_id="DR-1042",
+            developers=developers,
+            qa_users=qa_users or [],
+        )
+        row = make_db_row(dr_id="DR-1042", status="provisioned", **overrides)
+        row["config_json"] = json.dumps(config)
+        return row
+
+    @staticmethod
+    def _patch_control_repos():
+        """Patch _control_repos to return mocks for the four repos."""
+        mock_dr = MagicMock()
+        mock_obj = MagicMock()
+        mock_access = MagicMock()
+        mock_audit = MagicMock()
+        return (
+            patch(
+                "backend.router._control_repos",
+                return_value=(mock_dr, mock_obj, mock_access, mock_audit),
+            ),
+            mock_dr,
+            mock_obj,
+            mock_access,
+            mock_audit,
+        )
+
+    def test_add_developer_stages_pending_not_grants(self, client, mock_db):
+        """Adding a developer stages a pending edit; no grants run on PUT."""
+        row = self._provisioned_row(["alice@co.com"])
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(developers=["alice@co.com", "bob@co.com"])
+        ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users") as mock_manage:
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["dr_id"] == "DR-1042"
+        assert body["status"] == "pending_review"
+        assert body["pending_edit_id"].startswith("pe-")
+        # Grants must NOT be applied at staging time.
+        mock_manage.assert_not_called()
+
+    def test_remove_developer_stages_pending(self, client, mock_db):
+        """Removing a developer stages pending; no grants run on PUT."""
+        row = self._provisioned_row(["alice@co.com", "bob@co.com"])
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(developers=["alice@co.com"])
+        ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users") as mock_manage:
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 202
+        mock_manage.assert_not_called()
+
+    def test_qa_change_stages_pending(self, client, mock_db):
+        """QA-side additions/removals stage a pending edit."""
+        row = self._provisioned_row(
+            ["alice@co.com"], qa_users=["qa1@co.com", "qa2@co.com"]
+        )
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com"],
+            qa_users=["qa1@co.com", "qa3@co.com"],
+        )
+        ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users") as mock_manage:
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 202
+        mock_manage.assert_not_called()
+
+    def test_no_sensitive_change_applies_immediately(self, client, mock_db):
+        """A PUT that changes only the description applies immediately
+        (no staging, no grants)."""
+        row = self._provisioned_row(["alice@co.com"])
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com"],
+            description="Just updating the description",
+        )
+        ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users") as mock_manage:
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 200
+        mock_manage.assert_not_called()
+
+    def test_unprovisioned_sensitive_edit_applies_immediately(self, client, mock_db):
+        """A PUT on a 'valid' (non-provisioned) config applies immediately
+        even when the developer list changes -- staging is only for
+        provisioned DRs."""
+        config = valid_config_payload(
+            dr_id="DR-1042", developers=["alice@co.com"]
+        )
+        row = make_db_row(dr_id="DR-1042", status="valid")
+        row["config_json"] = json.dumps(config)
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com", "bob@co.com"]
+        )
+        with patch("backend.router._manage_users") as mock_manage:
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 200
+        # Non-provisioned config: no grant logic runs.
+        mock_manage.assert_not_called()
+
+    def test_sensitive_edit_writes_pending_audit(self, client, mock_db):
+        """A sensitive PUT writes a CONFIG_EDIT_PENDING audit entry containing
+        the diff and a pending_edit_id."""
+        row = self._provisioned_row(["alice@co.com"])
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com", "bob@co.com"]
+        )
+        ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users"):
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 202
+        assert mock_audit.append.call_count == 1
+        _args, kwargs = mock_audit.append.call_args
+        assert kwargs["dr_id"] == "DR-1042"
+        assert kwargs["action"] == "CONFIG_EDIT_PENDING"
+        assert kwargs["performed_by"] == "testuser@example.com"
+        assert kwargs["status"] == "PENDING"
+        detail = json.loads(kwargs["action_detail"])
+        assert "pending_edit_id" in detail
+        assert "changes" in detail
+        assert "proposed_config_json" in detail
+        # Expect a developers-field diff entry.
+        dev_changes = [c for c in detail["changes"] if c["field"] == "access.developers"]
+        assert len(dev_changes) == 1
+        assert dev_changes[0]["before"] == ["alice@co.com"]
+        assert dev_changes[0]["after"] == ["alice@co.com", "bob@co.com"]
+
+    def test_pending_audit_includes_proposed_config_json(self, client, mock_db):
+        """The staged audit row's action_detail must include
+        ``proposed_config_json`` whose value parses to a JSON object with the
+        new developer list."""
+        row = self._provisioned_row(["alice@co.com"])
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com", "bob@co.com"]
+        )
+        ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users"):
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 202
+        _args, kwargs = mock_audit.append.call_args
+        detail = json.loads(kwargs["action_detail"])
+        assert "proposed_config_json" in detail
+        proposed = json.loads(detail["proposed_config_json"])
+        assert isinstance(proposed, dict)
+        assert "bob@co.com" in proposed["developers"]
+        assert "alice@co.com" in proposed["developers"]
+
+    def test_additional_objects_change_stages_pending(self, client, mock_db):
+        """A sensitive edit changing only ``additional_objects`` stages a
+        pending edit (not just dev/qa users)."""
+        row = self._provisioned_row(["alice@co.com"])
+        # Pre-existing config has no additional_objects.
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com"],
+            additional_objects=["prod.schema.extra_table"],
+        )
+        ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users") as mock_manage:
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "pending_review"
+        assert body["pending_edit_id"].startswith("pe-")
+        # No grants applied at staging time.
+        mock_manage.assert_not_called()
+        # CONFIG_EDIT_PENDING audit row written.
+        pending_calls = [
+            c for c in mock_audit.append.call_args_list
+            if c.kwargs.get("action") == "CONFIG_EDIT_PENDING"
+        ]
+        assert len(pending_calls) == 1
+        detail = json.loads(pending_calls[0].kwargs["action_detail"])
+        ao_changes = [c for c in detail["changes"] if c["field"] == "additional_objects"]
+        assert len(ao_changes) == 1
+
+    def test_description_only_change_does_not_stage(self, client, mock_db):
+        """A PUT changing only description -> 200 + no CONFIG_EDIT_PENDING row."""
+        row = self._provisioned_row(["alice@co.com"])
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com"],
+            description="Just a description tweak",
+        )
+        ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users"):
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 200
+        pending_calls = [
+            c for c in mock_audit.append.call_args_list
+            if c.kwargs.get("action") == "CONFIG_EDIT_PENDING"
+        ]
+        assert pending_calls == []
+
+    def test_unprovisioned_sensitive_edit_does_not_stage(self, client, mock_db):
+        """For a `valid` (not provisioned) config, even sensitive changes
+        apply immediately. No CONFIG_EDIT_PENDING audit row is written."""
+        row = make_db_row(dr_id="DR-1042", status="valid")
+        row["config_json"] = json.dumps(
+            valid_config_payload(dr_id="DR-1042", developers=["alice@co.com"])
+        )
+        mock_db.sql.return_value = [row]
+
+        payload = valid_config_payload(
+            developers=["alice@co.com", "bob@co.com"]
+        )
+        ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
+        with ctx, patch("backend.router._manage_users"):
+            resp = client.put("/api/configs/DR-1042", json=payload)
+
+        assert resp.status_code == 200
+        pending_calls = [
+            c for c in mock_audit.append.call_args_list
+            if c.kwargs.get("action") == "CONFIG_EDIT_PENDING"
+        ]
+        assert pending_calls == []

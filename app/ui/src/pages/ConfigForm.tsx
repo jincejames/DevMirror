@@ -124,6 +124,17 @@ export default function ConfigForm() {
         ? await updateConfig(drId, payload)
         : await createConfig(payload);
 
+      // 202 path: sensitive edit staged for admin review.
+      if ('pending_edit_id' in out) {
+        setStatus('pending_review');
+        setSavedBanner(true);
+        setShowBanner(true);
+        setIsValid(true);
+        setErrors([]);
+        alert('Submitted for admin review.');
+        return;
+      }
+
       if (out.status === 'scanned') {
         // Auto-scan completed -- go to review page
         navigate(`/config/${out.dr_id}/scan`);
@@ -240,6 +251,16 @@ export default function ConfigForm() {
 
       // Save config changes first
       const out = await updateConfig(drId, payload);
+      // If the edit was staged for review, do not trigger re-provision.
+      if ('pending_edit_id' in out) {
+        setStatus('pending_review');
+        setSavedBanner(true);
+        setShowBanner(true);
+        setIsValid(true);
+        setErrors([]);
+        alert('Submitted for admin review. Re-provision skipped until approval.');
+        return;
+      }
       if (out.validation_errors.length > 0 && out.status === 'invalid') {
         setErrors(out.validation_errors);
         setIsValid(false);

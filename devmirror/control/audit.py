@@ -72,6 +72,20 @@ class AuditRepository:
         )
         return db_client.sql(sql)
 
+    def list_by_action(
+        self,
+        db_client: Any,
+        *,
+        action: str,
+    ) -> list[dict[str, Any]]:
+        """Return all audit entries with a given action, newest first."""
+        sql = (
+            f"SELECT * FROM {self._table} "
+            f"WHERE action = '{_escape(action)}' "
+            f"ORDER BY performed_at DESC"
+        )
+        return db_client.sql(sql)
+
     def purge_old_entries(
         self,
         db_client: Any,

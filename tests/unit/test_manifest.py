@@ -84,6 +84,19 @@ class TestBuildManifest:
         ss = _build(streams=s, classification=c)["scan_result"]["streams_scanned"][0]
         assert ss["workflow_id"] == "pip-001" and "tasks" not in ss
 
+    def test_non_prod_additional_objects_emitted(self) -> None:
+        sr = _build(non_prod_additional_objects=["dev_analytics.scratch.foo"])["scan_result"]
+        assert sr["non_prod_additional_objects"] == ["dev_analytics.scratch.foo"]
+
+    def test_non_prod_additional_objects_default_empty(self) -> None:
+        sr = _build()["scan_result"]
+        # Schema-stable: always present, defaults to empty list (never None).
+        assert sr["non_prod_additional_objects"] == []
+
+    def test_non_prod_additional_objects_none_becomes_empty(self) -> None:
+        sr = _build(non_prod_additional_objects=None)["scan_result"]
+        assert sr["non_prod_additional_objects"] == []
+
 
 # ------------------------------------------------------------------
 # Write / read roundtrip

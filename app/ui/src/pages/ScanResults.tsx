@@ -107,6 +107,18 @@ export default function ScanResults() {
         </div>
       )}
 
+      {manifest.non_prod_additional_objects && manifest.non_prod_additional_objects.length > 0 && (
+        <div className="banner banner-warning">
+          <strong>{manifest.non_prod_additional_objects.length}</strong>{' '}
+          additional objects come from a non-production catalog. Review before approving.
+          <ul style={{ margin: '0.5rem 0 0 1rem' }}>
+            {manifest.non_prod_additional_objects.map((fqn) => (
+              <li key={fqn}><code>{fqn}</code></li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="detail-section">
         <h2>Streams Scanned</h2>
         <div className="chips">

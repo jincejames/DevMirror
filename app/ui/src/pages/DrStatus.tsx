@@ -134,6 +134,11 @@ export default function DrStatus() {
       if (modRemoveQa.trim()) body.remove_qa_users = parseEmails(modRemoveQa);
 
       const result = await modifyDr(drId, body);
+      if ('pending_edit_id' in result) {
+        alert('Submitted for admin review.');
+        setModifySuccess('Pending admin approval.');
+        return;
+      }
       setModifySuccess(result.message);
       load();
     } catch (err) {

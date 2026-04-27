@@ -89,6 +89,7 @@ export interface ManifestData {
   objects: ManifestObject[];
   total_schemas: number;
   review_required: boolean;
+  non_prod_additional_objects?: string[];
   lineage_row_limit_hit?: boolean;
 }
 
@@ -190,5 +191,52 @@ export interface ModifyDrRequest {
 export interface ModifyDrResponse {
   dr_id: string;
   status: string;
+  message: string;
+}
+
+// ---- Approval workflow types ----
+
+export interface ChangeDiff {
+  field: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface PendingEdit {
+  pending_edit_id: string;
+  dr_id: string;
+  requested_by: string;
+  requested_at: string;
+  changes: ChangeDiff[];
+}
+
+export interface PendingProvision {
+  dr_id: string;
+  description: string | null;
+  requested_by: string;
+  scanned_at: string | null;
+  total_objects: number;
+  total_schemas: number;
+  review_required: boolean;
+  non_prod_additional_objects: string[];
+}
+
+export interface PendingEditsResponse {
+  pending: PendingEdit[];
+  pending_provisions: PendingProvision[];
+  total: number;
+}
+
+export interface PendingEditSubmittedResponse {
+  dr_id: string;
+  pending_edit_id: string;
+  status: 'pending_review';
+  message: string;
+  changes?: ChangeDiff[];
+}
+
+export interface ApprovalActionResponse {
+  pending_edit_id: string;
+  status: 'approved' | 'rejected' | 'partial';
   message: string;
 }

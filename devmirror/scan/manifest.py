@@ -36,6 +36,7 @@ def build_manifest(
     lineage_row_limit_hit: bool = False,
     scanned_at: datetime | None = None,
     table_sizes: dict[str, float] | None = None,
+    non_prod_additional_objects: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the scan_result manifest dict."""
     if scanned_at is None:
@@ -77,6 +78,8 @@ def build_manifest(
             "schemas_required": schemas_required,
             "total_objects": len(objects),
             "review_required": review_required,
+            "lineage_row_limit_hit": lineage_row_limit_hit,
+            "non_prod_additional_objects": list(non_prod_additional_objects or []),
         }
     }
 

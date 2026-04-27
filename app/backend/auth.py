@@ -68,25 +68,51 @@ def get_user_role(request: Request) -> str:
 
 
 def _resolve_role(email: str) -> str:
-    """Query Databricks groups API to determine if *email* is an admin."""
+    """Query Databricks groups API to determine if *email* is an admin.
+
+    Group members are stored as ``{value: <user_id>, display: <display name>}``
+    in SCIM. Neither field is the email, so we first translate the email to
+    a user ID via the SCIM users API, then check that ID against the admin
+    group's members. We also fall back to ``user.userName`` and ``user.emails``
+    in case display naming is non-standard.
+    """
     try:
         from databricks.sdk import WorkspaceClient
 
         admin_group = os.environ.get("DEVMIRROR_ADMIN_GROUP", "devmirror-admins")
         ws = WorkspaceClient()
+        email_lc = email.lower()
 
+        # 1. Resolve email -> user ID via SCIM users API
+        # SCIM filter strings need single quotes escaped
+        safe_email = email.replace("'", r"\'")
+        users = list(ws.users.list(filter=f"userName eq '{safe_email}'"))
+        user_id: str | None = None
+        if users:
+            user_id = str(getattr(users[0], "id", "") or "")
+
+        # 2. Find the admin group, then fetch full detail (list may omit members)
         groups = list(ws.groups.list(filter=f"displayName eq '{admin_group}'"))
         if not groups:
             logger.info("Admin group '%s' not found; defaulting to 'user'", admin_group)
             return "user"
 
-        group = groups[0]
+        group_id = getattr(groups[0], "id", None)
+        if not group_id:
+            return "user"
+        group = ws.groups.get(group_id)
         members = group.members or []
+
+        # 3. Match by user ID (primary) or by display fields (fallback)
         for member in members:
-            # member.display may be the email or the member may have a value field
-            member_ref = getattr(member, "value", None) or ""
-            member_display = getattr(member, "display", None) or ""
-            if email.lower() in (member_ref.lower(), member_display.lower()):
+            member_value = str(getattr(member, "value", "") or "")
+            member_display = str(getattr(member, "display", "") or "").lower()
+            if user_id and member_value == user_id:
+                return "admin"
+            if email_lc == member_display:
+                return "admin"
+            # Some directories store the email in member.value (e.g. SP refs)
+            if email_lc == member_value.lower():
                 return "admin"
 
         return "user"

@@ -6,6 +6,7 @@ import ScanResults from './pages/ScanResults';
 import ProvisionProgress from './pages/ProvisionProgress';
 import DrList from './pages/DrList';
 import DrStatus from './pages/DrStatus';
+import AdminApprovals from './pages/AdminApprovals';
 import { UserProvider, useUser } from './UserContext';
 
 class ErrorBoundary extends Component<
@@ -38,6 +39,7 @@ function NavHeader() {
   const location = useLocation();
   const isConfigs = location.pathname === '/' || location.pathname.startsWith('/config');
   const isDrs = location.pathname.startsWith('/dr');
+  const isApprovals = location.pathname.startsWith('/admin/approvals');
   const { email, role } = useUser();
   return (
     <header className="app-header">
@@ -45,6 +47,11 @@ function NavHeader() {
       <nav className="app-nav">
         <Link to="/" className={isConfigs ? 'active' : ''}>Configs</Link>
         <Link to="/drs" className={isDrs ? 'active' : ''}>Active DRs</Link>
+        {role === 'admin' && (
+          <Link to="/admin/approvals" className={isApprovals ? 'active' : ''}>
+            Approvals
+          </Link>
+        )}
       </nav>
       <div className="header-user">
         <span className="header-email">{email}</span>
@@ -71,6 +78,7 @@ export default function App() {
               <Route path="/config/:drId/provision/:taskId" element={<ProvisionProgress />} />
               <Route path="/drs" element={<DrList />} />
               <Route path="/dr/:drId" element={<DrStatus />} />
+              <Route path="/admin/approvals" element={<AdminApprovals />} />
             </Routes>
           </ErrorBoundary>
         </main>

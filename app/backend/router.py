@@ -10,11 +10,14 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from devmirror.modify.modification_engine import _manage_users
+
 from .auth import UserInfo, get_user_role, require_owner_or_admin
 from .config import get_current_user, get_db_client, get_settings
 from .helpers import (
     _auto_scan,
     _build_yaml,
+    _control_repos,
     _get_repo,
     _parse_config_in,
     _row_to_config_out,
@@ -174,8 +177,16 @@ def update_config(
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
     role: str = Depends(get_user_role),
-) -> ConfigOut:
-    """Update an existing DevMirror config."""
+) -> ConfigOut | Response:
+    """Update an existing DevMirror config.
+
+    Phase 2: edits to sensitive fields on a provisioned DR are staged for
+    admin approval (returns HTTP 202) instead of being applied immediately.
+    Sensitive fields are ``access.developers``, ``access.qa_users``, and
+    ``additional_objects``. Non-sensitive edits remain immediate.
+    """
+    from .approvals import compute_diff, has_sensitive_change, stage_pending_edit
+
     repo = _get_repo(settings, db_client)
     existing = repo.get(db_client, dr_id=dr_id)
     if existing is None:
@@ -185,6 +196,34 @@ def update_config(
     was_provisioned = existing.get("status") == "provisioned"
 
     status, all_errors, _dm_config = _validate_config(config_in)
+
+    # Compute the diff BEFORE persisting -- so we can choose to stage instead.
+    old_config_dict = json.loads(existing["config_json"])
+    new_config_dict = json.loads(config_in.model_dump_json())
+    changes = compute_diff(old_config_dict, new_config_dict)
+
+    # Sensitive edits on a provisioned DR -> stage for admin approval.
+    if was_provisioned and has_sensitive_change(changes):
+        _, _, _, audit_repo = _control_repos(settings)
+        pending_id = stage_pending_edit(
+            audit_repo,
+            db_client,
+            dr_id=dr_id,
+            requester=current_user,
+            proposed_config_json=config_in.model_dump_json(),
+            changes=changes,
+        )
+        return Response(
+            status_code=202,
+            content=json.dumps({
+                "dr_id": dr_id,
+                "pending_edit_id": pending_id,
+                "status": "pending_review",
+                "message": "Submitted for admin review.",
+                "changes": changes,
+            }),
+            media_type="application/json",
+        )
 
     # If the config was provisioned, keep the provisioned status after editing
     if was_provisioned and status == "valid":
@@ -203,6 +242,75 @@ def update_config(
         expiration_date=config_in.expiration_date,
         description=config_in.description,
     )
+
+    # Apply grants for non-sensitive access list changes on provisioned DRs.
+    # In practice access fields are sensitive (and routed through staging
+    # above), so this branch is reached only by future non-sensitive list
+    # fields. Kept for symmetry / safety.
+    if was_provisioned:
+        try:
+            old_config = _parse_config_in(existing["config_json"])
+            old_devs = set(old_config.developers or [])
+            new_devs = set(config_in.developers or [])
+            old_qa = set(old_config.qa_users or [])
+            new_qa = set(config_in.qa_users or [])
+
+            added_devs = sorted(new_devs - old_devs)
+            removed_devs = sorted(old_devs - new_devs)
+            added_qa = sorted(new_qa - old_qa)
+            removed_qa = sorted(old_qa - new_qa)
+
+            if added_devs or removed_devs or added_qa or removed_qa:
+                _dr_repo, obj_repo, access_repo, audit_repo = _control_repos(settings)
+
+                if added_devs:
+                    _manage_users(
+                        "add_users", dr_id, added_devs, "dev",
+                        db_client, obj_repo, access_repo,
+                    )
+                if removed_devs:
+                    _manage_users(
+                        "remove_users", dr_id, removed_devs, "dev",
+                        db_client, obj_repo, access_repo,
+                    )
+                if added_qa:
+                    _manage_users(
+                        "add_users", dr_id, added_qa, "qa",
+                        db_client, obj_repo, access_repo,
+                    )
+                if removed_qa:
+                    _manage_users(
+                        "remove_users", dr_id, removed_qa, "qa",
+                        db_client, obj_repo, access_repo,
+                    )
+
+                # Audit the diff
+                from devmirror.utils import now_iso
+                changes_audit = []
+                if added_devs or removed_devs:
+                    changes_audit.append({
+                        "field": "access.developers",
+                        "before": sorted(old_devs),
+                        "after": sorted(new_devs),
+                    })
+                if added_qa or removed_qa:
+                    changes_audit.append({
+                        "field": "access.qa_users",
+                        "before": sorted(old_qa),
+                        "after": sorted(new_qa),
+                    })
+                audit_repo.append(
+                    db_client,
+                    dr_id=dr_id,
+                    action="CONFIG_EDIT",
+                    performed_by=current_user,
+                    performed_at=now_iso(),
+                    status="SUCCESS",
+                    action_detail=json.dumps({"changes": changes_audit}),
+                )
+        except Exception:
+            logger.exception("Failed to apply access grants on edit for %s", dr_id)
+            # Non-fatal: the config row is already saved. Surface via audit.
 
     # Auto-scan if config is valid (not provisioned -- provisioned configs use re-provision)
     if status == "valid" and _dm_config is not None:

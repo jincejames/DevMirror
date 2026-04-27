@@ -25,9 +25,10 @@ from .conftest import make_client
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_group(members: list[tuple[str, str]]):
+def _make_group(members: list[tuple[str, str]], group_id: str = "g-100"):
     """Build a mock Databricks group object with the given (value, display) members."""
     group = MagicMock()
+    group.id = group_id
     member_mocks = []
     for value, display in members:
         m = MagicMock()
@@ -36,6 +37,35 @@ def _make_group(members: list[tuple[str, str]]):
         member_mocks.append(m)
     group.members = member_mocks
     return group
+
+
+def _wire_ws(mock_ws_cls, *, user_lookup: dict[str, str], group, group_id: str = "g-100"):
+    """Configure the WorkspaceClient mock to mimic the Databricks SCIM flow.
+
+    Args:
+        mock_ws_cls: the patched ``WorkspaceClient`` class.
+        user_lookup: map of email -> user_id. ``users.list(filter="userName eq '<e>'")``
+            returns one user with that id, or empty if not found.
+        group: the group mock returned by ``groups.list`` (truncated) and ``groups.get``.
+        group_id: id used to look up the group via ``groups.get``.
+    """
+    ws = mock_ws_cls.return_value
+
+    def users_list(filter: str = ""):
+        # filter looks like:  userName eq 'foo@bar.com'
+        for email, uid in user_lookup.items():
+            if f"'{email}'" in filter:
+                u = MagicMock()
+                u.id = uid
+                return [u]
+        return []
+    ws.users.list.side_effect = users_list
+
+    list_stub = MagicMock()
+    list_stub.id = group_id
+    ws.groups.list.return_value = [list_stub] if group is not None else []
+    ws.groups.get.return_value = group
+    return ws
 
 
 def _clear_role_cache():
@@ -50,74 +80,94 @@ def _clear_role_cache():
 
 
 class TestResolveRole:
-    """Tests for the private _resolve_role helper."""
+    """Tests for the private _resolve_role helper.
+
+    Mirrors the real Databricks SCIM payload: group ``members[]`` contain
+    ``value=<user_id>`` and ``display=<display name>`` -- never the email.
+    The resolver translates email -> user_id via the users API first.
+    """
 
     @patch("databricks.sdk.WorkspaceClient")
-    def test_returns_admin_when_email_in_group(self, mock_ws_cls):
-        ws = mock_ws_cls.return_value
-        ws.groups.list.return_value = [
-            _make_group([("admin@example.com", "admin@example.com")])
-        ]
-
+    def test_returns_admin_when_user_in_group(self, mock_ws_cls):
+        # Email maps to user id "u-1"; group lists "u-1" as a member.
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={"admin@example.com": "u-1"},
+            group=_make_group([("u-1", "Admin User")]),
+        )
         with patch.dict("os.environ", {"DEVMIRROR_ADMIN_GROUP": "devmirror-admins"}):
             result = _resolve_role("admin@example.com")
-
         assert result == "admin"
 
     @patch("databricks.sdk.WorkspaceClient")
-    def test_returns_user_when_email_not_in_group(self, mock_ws_cls):
-        ws = mock_ws_cls.return_value
-        ws.groups.list.return_value = [
-            _make_group([("other@example.com", "other@example.com")])
-        ]
-
+    def test_returns_user_when_user_not_in_group(self, mock_ws_cls):
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={"nonmember@example.com": "u-2"},
+            group=_make_group([("u-1", "Admin User")]),
+        )
         result = _resolve_role("nonmember@example.com")
         assert result == "user"
 
     @patch("databricks.sdk.WorkspaceClient")
-    def test_returns_user_when_group_not_found(self, mock_ws_cls):
-        ws = mock_ws_cls.return_value
-        ws.groups.list.return_value = []  # no groups found
+    def test_returns_user_when_email_unknown(self, mock_ws_cls):
+        """Email isn't in the user directory -- still match via display fallback."""
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={},  # users.list returns nothing
+            group=_make_group([("u-1", "someone-else")]),
+        )
+        result = _resolve_role("anyone@example.com")
+        assert result == "user"
 
+    @patch("databricks.sdk.WorkspaceClient")
+    def test_returns_user_when_group_not_found(self, mock_ws_cls):
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={"anyone@example.com": "u-1"},
+            group=None,
+        )
         result = _resolve_role("anyone@example.com")
         assert result == "user"
 
     @patch("databricks.sdk.WorkspaceClient")
     def test_returns_user_when_sdk_raises(self, mock_ws_cls):
         mock_ws_cls.side_effect = RuntimeError("SDK connection failed")
-
         result = _resolve_role("anyone@example.com")
         assert result == "user"
 
     @patch("databricks.sdk.WorkspaceClient")
-    def test_case_insensitive_email_matching(self, mock_ws_cls):
-        ws = mock_ws_cls.return_value
-        ws.groups.list.return_value = [
-            _make_group([("Admin@Example.COM", "Admin@Example.COM")])
-        ]
-
+    def test_case_insensitive_display_fallback(self, mock_ws_cls):
+        """If display happens to be the email, the case-insensitive fallback matches."""
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={},  # email cannot be resolved -> user_id is None
+            group=_make_group([("some-id", "Admin@Example.COM")]),
+        )
         result = _resolve_role("admin@example.com")
         assert result == "admin"
 
     @patch("databricks.sdk.WorkspaceClient")
-    def test_matches_on_display_field(self, mock_ws_cls):
-        """Member value is different but display matches the email."""
-        ws = mock_ws_cls.return_value
-        ws.groups.list.return_value = [
-            _make_group([("some-id-123", "admin@example.com")])
-        ]
-
+    def test_matches_on_value_when_value_is_email(self, mock_ws_cls):
+        """Some directories store the email in value (e.g. for SP refs)."""
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={},
+            group=_make_group([("admin@example.com", "Admin User")]),
+        )
         result = _resolve_role("admin@example.com")
         assert result == "admin"
 
     @patch("databricks.sdk.WorkspaceClient")
     def test_empty_members_returns_user(self, mock_ws_cls):
         """Group exists but has no members."""
-        ws = mock_ws_cls.return_value
-        group = MagicMock()
-        group.members = None
-        ws.groups.list.return_value = [group]
-
+        empty_group = MagicMock()
+        empty_group.members = None
+        _wire_ws(
+            mock_ws_cls,
+            user_lookup={"admin@example.com": "u-1"},
+            group=empty_group,
+        )
         result = _resolve_role("admin@example.com")
         assert result == "user"
 

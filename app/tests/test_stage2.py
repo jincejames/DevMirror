@@ -74,6 +74,70 @@ class TestScanConfig:
         resp = client.post("/api/configs/DR-9999/scan")
         assert resp.status_code == 404
 
+    @patch("devmirror.scan.lineage.query_table_sizes")
+    @patch("devmirror.scan.dependency_classifier.classify_dependencies")
+    @patch("devmirror.scan.lineage.query_lineage")
+    @patch("devmirror.scan.stream_resolver.resolve_streams")
+    def test_scan_flags_non_prod_additional_objects(
+        self, mock_resolve, mock_lineage, mock_classify, mock_table_sizes,
+        client, mock_db,
+    ):
+        """An additional_object whose catalog differs from the streams' baseline
+        catalog must surface in manifest.scan_result.non_prod_additional_objects."""
+        from devmirror.scan.dependency_classifier import (
+            ClassificationResult,
+            ClassifiedObject,
+        )
+
+        # Config has additional_objects from a non-prod catalog.
+        config_in = valid_config_payload(
+            dr_id="DR-1042",
+            additional_objects=["dev_analytics.scratch.foo"],
+        )
+        row = make_db_row(
+            status="valid",
+            config_json=json.dumps(config_in),
+        )
+        mock_db.sql.return_value = [row]
+        mock_db.client = MagicMock()
+
+        resolved_stream = MagicMock()
+        resolved_stream.name = "my-job-1"
+        resolved_stream.resource_id = "12345"
+        resolved_stream.resource_type = "job"
+        resolved_stream.task_keys = []
+        mock_resolve.return_value = ([resolved_stream], [])
+
+        lineage_result = MagicMock()
+        lineage_result.edges = []
+        lineage_result.row_limit_hit = False
+        mock_lineage.return_value = lineage_result
+
+        # Streams resolved into prod_core; additional object is in dev_analytics.
+        mock_classify.return_value = ClassificationResult(
+            objects=[
+                ClassifiedObject(
+                    fqn="prod_core.schema.table_a",
+                    object_type="table",
+                    access_mode="READ_ONLY",
+                    format="delta",
+                ),
+                ClassifiedObject(
+                    fqn="dev_analytics.scratch.foo",
+                    object_type="table",
+                    access_mode="READ_ONLY",
+                    format="delta",
+                ),
+            ],
+            review_required=True,
+        )
+        mock_table_sizes.return_value = {}
+
+        resp = client.post("/api/configs/DR-1042/scan")
+        assert resp.status_code == 200, resp.text
+        sr = resp.json()["manifest"]["scan_result"]
+        assert sr["non_prod_additional_objects"] == ["dev_analytics.scratch.foo"]
+
 
 # ---- Manifest endpoint tests ----
 
@@ -672,29 +736,110 @@ class TestModifyDr:
     @patch(_MODIFY_CONTROL_PATCHES[1])
     @patch(_MODIFY_CONTROL_PATCHES[2])
     @patch(_MODIFY_CONTROL_PATCHES[3])
-    def test_modify_dr_owner_allowed(
+    def test_modify_dr_owner_user_change_stages_pending(
         self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
         mock_modify, user_client, mock_db,
     ):
-        """Owner (non-admin) can modify their own DR."""
+        """Phase 2: owner (non-admin) requesting an add_developers change
+        on their own provisioned DR is staged for admin approval (HTTP 202)
+        rather than being applied immediately."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="testuser@example.com",
+        )
+        # Mock the configs row so the staging path can build the proposed config.
+        cfg_row = make_db_row(
+            dr_id="DR-1042",
+            status="provisioned",
+            created_by="testuser@example.com",
+        )
+        # Override config_json so developers/qa_users are deterministic.
+        cfg_row["config_json"] = json.dumps(valid_config_payload(
+            dr_id="DR-1042",
+            developers=["alice@co.com"],
+        ))
+        mock_db.sql.return_value = [cfg_row]
+        mock_db.sql_with_params.side_effect = lambda stmt, params: [cfg_row]
+
+        body = {"add_developers": ["dev2@example.com"]}
+        resp = user_client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["dr_id"] == "DR-1042"
+        assert data["status"] == "pending_review"
+        assert data["pending_edit_id"].startswith("pe-")
+        # Engine should NOT be invoked when staging.
+        mock_modify.assert_not_called()
+
+    @patch("devmirror.modify.modification_engine.modify_dr")
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_expiration_only_applies_immediately(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        mock_modify, client, mock_db,
+    ):
+        """An expiration-only modify request goes through the engine
+        (immediate path), not the staging path."""
         MockDRRepo.return_value.get.return_value = make_dr_control_row(
             created_by="testuser@example.com",
         )
 
         action = MagicMock()
-        action.action = "ADD_DEVELOPER"
-        action.detail = "Added dev2@example.com"
+        action.action = "EXTEND_EXPIRATION"
+        action.detail = "Extended expiration to 2026-08-01"
         result = MagicMock()
         result.audit_status = "SUCCESS"
         result.actions = [action]
         mock_modify.return_value = result
 
-        body = {"add_developers": ["dev2@example.com"]}
-        resp = user_client.post("/api/drs/DR-1042/modify", json=body)
+        body = {"new_expiration_date": "2026-08-01"}
+        resp = client.post("/api/drs/DR-1042/modify", json=body)
         assert resp.status_code == 200
+        # Engine WAS invoked (immediate path).
+        mock_modify.assert_called_once()
+        # Audit repo should NOT have a CONFIG_EDIT_PENDING row from staging.
+        pending_calls = [
+            c for c in MockAuditRepo.return_value.append.call_args_list
+            if c.kwargs.get("action") == "CONFIG_EDIT_PENDING"
+        ]
+        assert pending_calls == []
+
+    @patch("devmirror.modify.modification_engine.modify_dr")
+    @patch(_MODIFY_CONTROL_PATCHES[0])
+    @patch(_MODIFY_CONTROL_PATCHES[1])
+    @patch(_MODIFY_CONTROL_PATCHES[2])
+    @patch(_MODIFY_CONTROL_PATCHES[3])
+    def test_modify_dr_mixed_user_and_expiration_stages_pending(
+        self, MockDRRepo, MockObjRepo, MockAccessRepo, MockAuditRepo,
+        mock_modify, client, mock_db,
+    ):
+        """Body has both add_developers and new_expiration_date -> staged
+        (sensitive change present)."""
+        MockDRRepo.return_value.get.return_value = make_dr_control_row(
+            created_by="testuser@example.com",
+        )
+        cfg_row = make_db_row(
+            dr_id="DR-1042", status="provisioned", created_by="testuser@example.com",
+        )
+        cfg_row["config_json"] = json.dumps(valid_config_payload(
+            dr_id="DR-1042",
+            developers=["alice@co.com"],
+        ))
+        mock_db.sql.return_value = [cfg_row]
+        mock_db.sql_with_params.side_effect = lambda stmt, params: [cfg_row]
+
+        body = {
+            "add_developers": ["dev2@example.com"],
+            "new_expiration_date": "2026-08-01",
+        }
+        resp = client.post("/api/drs/DR-1042/modify", json=body)
+        assert resp.status_code == 202
         data = resp.json()
-        assert data["dr_id"] == "DR-1042"
-        assert data["status"] == "SUCCESS"
+        assert data["status"] == "pending_review"
+        assert data["pending_edit_id"].startswith("pe-")
+        # Engine NOT invoked for the staged path.
+        mock_modify.assert_not_called()
 
     @patch("devmirror.modify.modification_engine.modify_dr")
     @patch(_MODIFY_CONTROL_PATCHES[0])

@@ -16,6 +16,7 @@ from devmirror.settings import SettingsError, load_settings
 from devmirror.utils.db_client import DbClient
 
 from .router import router
+from .router_admin import router_admin
 from .router_stage2 import router_stage2
 from .tasks import TaskTracker
 
@@ -110,6 +111,7 @@ app = FastAPI(title="DevMirror", version="0.1.0", lifespan=lifespan)
 # API routes (must be registered BEFORE the static file mount)
 app.include_router(router, prefix="/api")
 app.include_router(router_stage2, prefix="/api")
+app.include_router(router_admin, prefix="/api")
 
 
 @app.get("/api/health", operation_id="healthCheck")

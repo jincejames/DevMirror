@@ -200,12 +200,34 @@ def _run_scan(db_client: DbClient, settings: Settings, dm_config, target_catalog
     ]
     table_sizes = query_table_sizes(db_client, table_fqns) if table_fqns else {}
 
+    # Determine baseline catalog(s) -- the catalogs the streams' resolved
+    # objects live in. If additional_objects reference a different catalog,
+    # flag them as non-prod for admin review.
+    additional_set = set(dr.additional_objects or [])
+    baseline_catalogs: set[str] = set()
+    for obj in classification.objects:
+        if obj.fqn in additional_set:
+            # Skip objects that came from additional_objects; we don't want
+            # to treat their own catalog as a baseline.
+            continue
+        parts = obj.fqn.split(".")
+        if len(parts) == 3:
+            baseline_catalogs.add(parts[0])
+
+    non_prod_additional: list[str] = []
+    if baseline_catalogs:
+        for fqn in additional_set:
+            parts = fqn.split(".")
+            if len(parts) == 3 and parts[0] not in baseline_catalogs:
+                non_prod_additional.append(fqn)
+
     manifest = build_manifest(
         dr_id=dr.dr_id,
         streams=resolved,
         classification=classification,
         lineage_row_limit_hit=lineage_result.row_limit_hit,
         table_sizes=table_sizes or None,
+        non_prod_additional_objects=non_prod_additional,
     )
     return manifest
 

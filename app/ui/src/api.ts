@@ -18,6 +18,9 @@ import type {
   RefreshStartResponse,
   ModifyDrRequest,
   ModifyDrResponse,
+  PendingEditsResponse,
+  PendingEditSubmittedResponse,
+  ApprovalActionResponse,
 } from './types';
 
 const BASE = '/api';
@@ -70,12 +73,20 @@ export async function getConfig(drId: string): Promise<ConfigOut> {
   return request<ConfigOut>(`${BASE}/configs/${encodeURIComponent(drId)}`);
 }
 
-export async function updateConfig(drId: string, data: ConfigIn): Promise<ConfigOut> {
-  return request<ConfigOut>(`${BASE}/configs/${encodeURIComponent(drId)}`, {
+export async function updateConfig(
+  drId: string,
+  data: ConfigIn,
+): Promise<ConfigOut | PendingEditSubmittedResponse> {
+  const res = await fetch(`${BASE}/configs/${encodeURIComponent(drId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
+  if (!res.ok) {
+    const body = await res.text();
+    throw buildResponseError(res.status, body);
+  }
+  return res.json();
 }
 
 export async function deleteConfig(drId: string): Promise<void> {
@@ -142,6 +153,7 @@ export async function getManifest(drId: string): Promise<ManifestResponse> {
       total_schemas: ((sr.schemas_required as string[]) ?? []).length,
       review_required: (sr.review_required as boolean) ?? false,
       lineage_row_limit_hit: (sr.lineage_row_limit_hit as boolean) ?? false,
+      non_prod_additional_objects: (sr.non_prod_additional_objects as string[]) ?? [],
     },
     scanned_at: raw.scanned_at,
   };
@@ -209,13 +221,45 @@ export async function reprovisionDr(drId: string): Promise<ProvisionStartRespons
   );
 }
 
-export async function modifyDr(drId: string, body: ModifyDrRequest): Promise<ModifyDrResponse> {
-  return request<ModifyDrResponse>(
-    `${BASE}/drs/${encodeURIComponent(drId)}/modify`,
+export async function modifyDr(
+  drId: string,
+  body: ModifyDrRequest,
+): Promise<ModifyDrResponse | PendingEditSubmittedResponse> {
+  const res = await fetch(`${BASE}/drs/${encodeURIComponent(drId)}/modify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw buildResponseError(res.status, errBody);
+  }
+  return res.json();
+}
+
+// ---- Approval workflow API ----
+
+export async function listApprovals(): Promise<PendingEditsResponse> {
+  return request<PendingEditsResponse>(`${BASE}/admin/approvals`);
+}
+
+export async function approveEdit(pendingEditId: string): Promise<ApprovalActionResponse> {
+  return request<ApprovalActionResponse>(
+    `${BASE}/admin/approvals/${encodeURIComponent(pendingEditId)}/approve`,
+    { method: 'POST' },
+  );
+}
+
+export async function rejectEdit(
+  pendingEditId: string,
+  reason?: string,
+): Promise<ApprovalActionResponse> {
+  return request<ApprovalActionResponse>(
+    `${BASE}/admin/approvals/${encodeURIComponent(pendingEditId)}/reject`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ reason: reason ?? '' }),
     },
   );
 }

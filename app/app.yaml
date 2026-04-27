@@ -3,9 +3,6 @@ command:
   - -c
   - uvicorn backend.main:app --host=0.0.0.0 --port=${DATABRICKS_APP_PORT:-8000}
 env:
-  # SQL warehouse for Statement Execution API.
-  # To use a managed resource instead, add a SQL warehouse resource via the
-  # Databricks Apps UI and replace 'value' with 'valueFrom: <resource-key>'.
   - name: DEVMIRROR_WAREHOUSE_ID
     value: e9b34f7a2e4b0561
   - name: DEVMIRROR_CONTROL_CATALOG
@@ -14,11 +11,3 @@ env:
     value: jince_james
   - name: DEVMIRROR_ADMIN_GROUP
     value: devmirror-admins
-
-  # DR ID generation (Stage 4 US-34 / US-35). Defaults shown. Uncomment to override.
-  # Prefix must match ^[A-Za-z][A-Za-z0-9]{0,7}$ (1-8 alphanumeric, starts with letter).
-  # Padding must be an integer between 3 and 12 inclusive.
-  # - name: DEVMIRROR_DR_ID_PREFIX
-  #   value: DR
-  # - name: DEVMIRROR_DR_ID_PADDING
-  #   value: "5"

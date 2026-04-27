@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 
 from .auth import get_user_role, require_admin, require_owner_or_admin
 from .config import get_current_user, get_db_client, get_settings, get_task_tracker
@@ -607,8 +608,14 @@ def modify_dr_endpoint(
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
     role: str = Depends(get_user_role),
-) -> ModifyDrResponse:
-    """Modify expiration date or user access on a provisioned DR."""
+) -> ModifyDrResponse | Response:
+    """Modify expiration date or user access on a provisioned DR.
+
+    Phase 2: changes to user-list fields (``add_developers`` /
+    ``remove_developers`` / ``add_qa_users`` / ``remove_qa_users``) are
+    staged for admin approval (HTTP 202) instead of being applied
+    immediately. Expiration-only changes still go through the engine.
+    """
     from devmirror.modify.modification_engine import ModificationError, modify_dr
 
     dr_repo, obj_repo, access_repo, audit_repo = _control_repos(settings)
@@ -632,7 +639,53 @@ def modify_dr_endpoint(
             "Modification is only allowed on ACTIVE or EXPIRING_SOON DRs.",
         )
 
-    # 4. Call the modification engine
+    # 3b. Sensitive (user-list) changes: stage for admin approval.
+    user_changes = bool(
+        body.add_developers
+        or body.remove_developers
+        or body.add_qa_users
+        or body.remove_qa_users
+    )
+    if user_changes:
+        from .approvals import compute_diff, stage_pending_edit
+
+        config_repo = _get_repo(settings, db_client)
+        cfg_row = config_repo.get(db_client, dr_id=dr_id)
+        if cfg_row is None:
+            raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+
+        old_dict = json.loads(cfg_row["config_json"])
+        new_dict = dict(old_dict)
+        new_dict["developers"] = sorted(
+            (set(old_dict.get("developers") or []) - set(body.remove_developers or []))
+            | set(body.add_developers or [])
+        )
+        new_dict["qa_users"] = sorted(
+            (set(old_dict.get("qa_users") or []) - set(body.remove_qa_users or []))
+            | set(body.add_qa_users or [])
+        )
+        changes = compute_diff(old_dict, new_dict)
+        if changes:
+            pending_id = stage_pending_edit(
+                audit_repo,
+                db_client,
+                dr_id=dr_id,
+                requester=current_user,
+                proposed_config_json=json.dumps(new_dict),
+                changes=changes,
+            )
+            return Response(
+                status_code=202,
+                content=json.dumps({
+                    "dr_id": dr_id,
+                    "pending_edit_id": pending_id,
+                    "status": "pending_review",
+                    "message": "Submitted for admin review.",
+                }),
+                media_type="application/json",
+            )
+
+    # 4. Call the modification engine (expiration-only path)
     try:
         result = modify_dr(
             dr_id,

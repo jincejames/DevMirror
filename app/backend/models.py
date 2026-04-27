@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from devmirror.config.schema import (
     Access,
@@ -24,7 +24,13 @@ class ConfigIn(BaseModel):
     assigns it at ``POST /api/configs`` time (see Stage 4 US-34).  It is
     populated before :meth:`to_devmirror_config` is called, so the nested
     ``DevelopmentRequest`` still carries a concrete value.
+
+    ``extra="forbid"``: unknown / typo'd field names are rejected with a
+    422 instead of silently ignored.  This catches client typos and any
+    tampered config_json read back from the DB.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     dr_id: str | None = None
     description: str | None = None

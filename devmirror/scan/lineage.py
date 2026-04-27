@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -100,6 +101,12 @@ def query_lineage(
 _BYTES_PER_GB = 1_073_741_824  # 1024^3
 
 
+# Strict identifier regex for catalog names that go into FROM clauses.
+# Spark SQL doesn't allow binding identifiers as parameters, so we gate
+# the interpolation behind a tight whitelist.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def query_table_sizes(
     db_client: DbClient,
     table_fqns: list[str],
@@ -114,22 +121,36 @@ def query_table_sizes(
         if len(parts) != 3:
             continue
         catalog, schema, table_name = parts
+        # Reject catalog identifiers that don't match the strict whitelist
+        # (anything with quotes, spaces, semicolons, etc.).  Defense in
+        # depth -- upstream FQN validation should already have rejected
+        # these, but we don't trust transitively.
+        if not _IDENT_RE.match(catalog):
+            logger.warning("Refusing to query lineage for unsafe catalog %r", catalog)
+            continue
         key = (catalog, schema)
         groups.setdefault(key, []).append(table_name)
 
     sizes: dict[str, float] = {}
     for (catalog, schema), table_names in groups.items():
-        escaped_names = ", ".join(
-            f"'{name.replace(chr(39), chr(39) + chr(39))}'" for name in table_names
-        )
+        # Table names go into IN (:t0, :t1, ...) via named parameters.
+        # Schema goes through :schema_name.  Catalog must be interpolated
+        # (it's an identifier in FROM, not bindable) -- already gated by
+        # _IDENT_RE above.
+        params: dict[str, str] = {"schema_name": schema}
+        placeholders: list[str] = []
+        for i, name in enumerate(table_names):
+            key = f"t{i}"
+            params[key] = name
+            placeholders.append(f":{key}")
         sql = (
-            f"SELECT table_name, data_size_in_bytes "
+            "SELECT table_name, data_size_in_bytes "
             f"FROM {catalog}.information_schema.tables "
-            f"WHERE table_schema = '{schema}' "
-            f"AND table_name IN ({escaped_names})"
+            "WHERE table_schema = :schema_name "
+            f"AND table_name IN ({', '.join(placeholders)})"
         )
         try:
-            rows = db_client.sql(sql)
+            rows = db_client.sql_with_params(sql, params)
         except Exception:
             logger.debug(
                 "Failed to query table sizes for %s.%s, skipping",

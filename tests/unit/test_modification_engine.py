@@ -29,6 +29,20 @@ _FUTURE = (date.today() + timedelta(days=30)).isoformat()
 _FAR_FUTURE = (date.today() + timedelta(days=60)).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def _clear_principal_cache():
+    """Reset access_manager's existence-check cache between tests."""
+    from devmirror.provision.access_manager import (
+        _principal_cache,
+        _principal_cache_lock,
+    )
+    with _principal_cache_lock:
+        _principal_cache.clear()
+    yield
+    with _principal_cache_lock:
+        _principal_cache.clear()
+
+
 def _obj_row(
     source_fqn: str = "prod_cat.schema1.table1",
     target_fqn: str = "dev_cat.dr_100_schema1.table1",
@@ -54,6 +68,11 @@ def _repos(
     db.grant = MagicMock()
     db.revoke = MagicMock()
     db.create_schema = MagicMock()
+    # Wire SCIM existence-check mocks so apply_grants's principal-existence
+    # check (Sec finding #9) doesn't reject every test principal.
+    found = MagicMock()
+    db.client.users.list.return_value = [found]
+    db.client.groups.list.return_value = [found]
 
     dr_repo = MagicMock(spec=DRRepository)
     dr_repo.get = MagicMock(return_value={

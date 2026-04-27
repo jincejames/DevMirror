@@ -137,12 +137,26 @@ async def add_security_headers(request, call_next):
     """Add baseline security headers on every response.
 
     Databricks Apps' reverse proxy may add some headers, but we don't
-    rely on that.  Closes clickjacking + MIME-sniffing surface.
+    rely on that.  Closes clickjacking + MIME-sniffing surface, and adds a
+    baseline CSP that blocks any future XSS sink that may slip in.
     """
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # CSP: same-origin scripts only; allow inline styles (Vite emits some);
+    # data: URIs for images (favicon).  frame-ancestors 'none' duplicates
+    # X-Frame-Options for browsers that ignore the legacy header.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
     return response
 
 

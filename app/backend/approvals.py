@@ -66,8 +66,7 @@ def stage_pending_edit(
 
     ``original_created_by`` snapshots the config row's owner at staging
     time.  The approve endpoint compares this against the live
-    ``created_by`` to detect a delete-and-recreate-with-same-dr_id race
-    (Sec finding #6).
+    ``created_by`` to detect a delete-and-recreate-with-same-dr_id race.
     """
     from devmirror.utils import now_iso
     pending_edit_id = new_pending_edit_id()

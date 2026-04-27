@@ -277,14 +277,16 @@ def refresh_dr(
                     error=tr.error or "unknown error",
                 ))
 
-    # Update DR last_refreshed_at
+    # Update DR last_refreshed_at via parameterized SQL.
     try:
         dr_last_refresh_sql = (
             f"UPDATE {dr_repo.table_fqn} SET "
-            f"last_refreshed_at = '{now}' "
-            f"WHERE dr_id = '{dr_id}'"
+            "last_refreshed_at = :now "
+            "WHERE dr_id = :dr_id"
         )
-        db_client.sql_exec(dr_last_refresh_sql)
+        db_client.sql_exec_with_params(
+            dr_last_refresh_sql, {"now": now, "dr_id": dr_id},
+        )
     except Exception:
         logger.debug("DR last_refreshed_at update failed, non-fatal")
 

@@ -73,7 +73,26 @@ def _mock_db() -> MagicMock:
     m = MagicMock()
     m.grant = MagicMock()
     m.revoke = MagicMock()
+    # Wire the SCIM existence-check mocks so apply_grants/apply_revokes
+    # doesn't reject every principal as "not found" (Sec finding #9).
+    found = MagicMock()
+    m.client.users.list.return_value = [found]
+    m.client.groups.list.return_value = [found]
     return m
+
+
+@pytest.fixture(autouse=True)
+def _clear_principal_cache():
+    """Reset the existence-check cache between tests so mocks behave."""
+    from devmirror.provision.access_manager import (
+        _principal_cache,
+        _principal_cache_lock,
+    )
+    with _principal_cache_lock:
+        _principal_cache.clear()
+    yield
+    with _principal_cache_lock:
+        _principal_cache.clear()
 
 
 class TestGrantSchemaUsageSql:
@@ -199,6 +218,22 @@ class TestApplyGrants:
         result = apply_grants(db, ["a.b"], [])
         assert result.all_succeeded
         assert result.granted == 0
+
+    def test_refuses_nonexistent_principal(self) -> None:
+        """Sec finding #9: refuse to grant to a principal SCIM can't find."""
+        db = _mock_db()
+        # Override the SCIM mock to return empty (principal doesn't exist).
+        db.client.users.list.return_value = []
+        db.client.groups.list.return_value = []
+        result = apply_grants(
+            db, ["dev_analytics.dr_1042_customers"], ["ghost@company.com"],
+        )
+        assert not result.all_succeeded
+        assert result.granted == 0
+        assert len(result.failed) == 1
+        assert "not found in workspace SCIM directory" in result.failed[0][1]
+        # No actual grant calls should have been made.
+        db.grant.assert_not_called()
 
 
 # ===================================================================

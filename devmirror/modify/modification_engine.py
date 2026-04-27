@@ -363,8 +363,15 @@ def modify_dr(
     data_revision: DataRevision | None = None,
     add_streams: list[str] | None = None,
     client: WorkspaceClient | None = None,
+    performed_by: str = "SYSTEM",
 ) -> ModifyResult:
-    """Apply modifications to an active DR with partial-success semantics."""
+    """Apply modifications to an active DR with partial-success semantics.
+
+    ``performed_by`` is recorded on the audit row.  Default ``"SYSTEM"``
+    is correct for lifecycle DAB jobs; the FastAPI ``modify_dr_endpoint``
+    overrides with the authenticated user's email so the audit trail
+    correctly attributes user-initiated changes.
+    """
     result = ModifyResult(dr_id=dr_id)
 
     # Validate DR is active (inlined from _validate_dr_for_modify)
@@ -475,7 +482,7 @@ def modify_dr(
         db_client,
         dr_id=dr_id,
         action="MODIFY",
-        performed_by="SYSTEM",
+        performed_by=performed_by,
         performed_at=now_iso(),
         status=result.audit_status,
         action_detail=json.dumps({

@@ -727,6 +727,7 @@ def modify_dr_endpoint(
             add_qa_users=body.add_qa_users,
             remove_qa_users=body.remove_qa_users,
             new_expiration_date=body.new_expiration_date,
+            performed_by=current_user,
         )
     except ModificationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

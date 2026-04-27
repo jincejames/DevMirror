@@ -217,7 +217,16 @@ export default function AdminApprovals() {
 }
 
 function fmt(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.join(', ')}]`;
   if (v === null || v === undefined) return '(none)';
+  if (Array.isArray(v)) return `[${v.join(', ')}]`;
+  // Stringify objects via JSON so a nested change diff doesn't render
+  // as the opaque "[object Object]".
+  if (typeof v === 'object') {
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return '(unserializable)';
+    }
+  }
   return String(v);
 }

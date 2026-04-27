@@ -19,6 +19,9 @@ def _mock_db(rows=None) -> MagicMock:
     m = MagicMock()
     m.sql_exec = MagicMock()
     m.sql = MagicMock(return_value=rows or [])
+    # query_table_sizes (Sec finding #14) now uses sql_with_params; route
+    # the mock to sql so existing return_value setups still work.
+    m.sql_with_params = MagicMock(return_value=rows or [])
     return m
 
 
@@ -162,7 +165,7 @@ class TestQueryTableSizes:
         )
 
         # Should have been called twice (once per catalog.schema group)
-        assert db.sql.call_count == 2
+        assert db.sql_with_params.call_count == 2
 
     def test_skips_invalid_fqn(self) -> None:
         db = _mock_db([
@@ -175,12 +178,12 @@ class TestQueryTableSizes:
         )
 
         # Only the valid FQN should be queried
-        assert db.sql.call_count == 1
+        assert db.sql_with_params.call_count == 1
         assert "cat.sch.t1" in result
 
     def test_sql_error_is_silently_skipped(self) -> None:
         db = _mock_db()
-        db.sql.side_effect = RuntimeError("access denied")
+        db.sql_with_params.side_effect = RuntimeError("access denied")
 
         result = query_table_sizes(
             db,
@@ -194,10 +197,29 @@ class TestQueryTableSizes:
 
         query_table_sizes(db, ["my_catalog.my_schema.my_table"])
 
-        sql_arg = db.sql.call_args[0][0]
+        # Catalog is interpolated (identifier in FROM); schema and table_name
+        # are now bound via :schema_name and :t0 parameters.
+        sql_arg, params = db.sql_with_params.call_args[0]
         assert "my_catalog.information_schema.tables" in sql_arg
-        assert "table_schema = 'my_schema'" in sql_arg
-        assert "my_table" in sql_arg
+        assert "table_schema = :schema_name" in sql_arg
+        assert "table_name IN (:t0)" in sql_arg
+        assert params["schema_name"] == "my_schema"
+        assert params["t0"] == "my_table"
+
+    def test_rejects_unsafe_catalog(self) -> None:
+        """Sec finding #14: catalog with quotes/special chars is dropped."""
+        db = _mock_db([])
+        # A malicious FQN whose first segment looks like a SQL injection
+        # attempt is rejected by _IDENT_RE before the SQL is built.
+        result = query_table_sizes(
+            db,
+            ["bad'cat.sch.tbl", "good_cat.sch.tbl"],
+        )
+        assert result == {}
+        # Only the safe catalog led to a SQL call.
+        assert db.sql_with_params.call_count == 1
+        sql_arg, _params = db.sql_with_params.call_args[0]
+        assert "good_cat.information_schema.tables" in sql_arg
 
 
 # ===========================================================================

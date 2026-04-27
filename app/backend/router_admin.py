@@ -229,7 +229,10 @@ def approve_edit(
                 db_client, obj_repo, access_repo,
             )
     except Exception as exc:
-        logger.exception("Failed to apply grants on approval for %s", dr_id)
+        # Use logger.error (no exc_info) so the proposed config payload in
+        # local frame variables doesn't end up in the stack trace logs.
+        # The exception's __str__ is captured below in error_message.
+        logger.error("Failed to apply grants on approval for %s: %s", dr_id, exc)
         # Still write the APPROVED audit (the config row is already updated).
         audit_repo.append(
             db_client,
@@ -310,7 +313,7 @@ def reject_edit(
 
 
 # ---------------------------------------------------------------------------
-# POST /api/admin/cache/flush  (Sec finding #7)
+# POST /api/admin/cache/flush
 # ---------------------------------------------------------------------------
 
 

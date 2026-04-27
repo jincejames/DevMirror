@@ -327,6 +327,12 @@ def modify(config_path: str, add_streams_csv: str | None) -> None:
     ctx = _cli_context()
     client = WorkspaceClient() if add_streams else None
 
+    # Resolve the current user so the audit row attributes the change correctly.
+    try:
+        cli_user = (WorkspaceClient().current_user.me().user_name) or "CLI"
+    except Exception:
+        cli_user = "CLI"
+
     click.echo(f"Modifying DR {dr_id}...")
     try:
         result = modify_dr(
@@ -346,6 +352,7 @@ def modify(config_path: str, add_streams_csv: str | None) -> None:
             data_revision=data_revision,
             add_streams=add_streams,
             client=client,
+            performed_by=cli_user,
         )
     except ModificationError as exc:
         raise click.ClickException(str(exc)) from exc

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,6 +17,60 @@ logger = logging.getLogger(__name__)
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z0-9_]+$")
 # Principals can be email addresses, group names, etc. -- validated loosely.
 _SAFE_PRINCIPAL = re.compile(r"^[a-zA-Z0-9_.@\-]+$")
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+# Existence-check cache: principal -> (exists_bool, timestamp)
+# Refuse to grant access to principals that don't exist in the workspace,
+# since Databricks may silently accept the grant and create an orphan
+# that becomes valid once a real account with that name is added.
+_principal_cache: dict[str, tuple[bool, float]] = {}
+_principal_cache_lock = threading.Lock()
+_PRINCIPAL_CACHE_TTL = 300  # 5 minutes
+
+
+class PrincipalNotFoundError(Exception):
+    """Raised when a principal can't be resolved in the workspace SCIM directory."""
+
+
+def _principal_exists(principal: str, ws_client: object | None = None) -> bool:
+    """Return True if the principal resolves to a user or group via SCIM.
+
+    SDK errors (network, permissions) are treated as "exists=True" so we
+    don't block legitimate grants on a transient lookup failure.  A real
+    miss (the lookup succeeded and returned no results) is treated as
+    "exists=False" and the caller raises ``PrincipalNotFoundError``.
+    """
+    now = time.time()
+    with _principal_cache_lock:
+        cached = _principal_cache.get(principal)
+        if cached is not None:
+            exists, ts = cached
+            if now - ts < _PRINCIPAL_CACHE_TTL:
+                return exists
+
+    try:
+        if ws_client is None:
+            from databricks.sdk import WorkspaceClient
+            ws_client = WorkspaceClient()
+        is_email = bool(_EMAIL_RE.match(principal))
+        if is_email:
+            users = list(ws_client.users.list(filter=f"userName eq '{principal}'"))
+            exists = len(users) > 0
+        else:
+            groups = list(ws_client.groups.list(filter=f"displayName eq '{principal}'"))
+            exists = len(groups) > 0
+    except Exception:
+        # Lookup failure -> assume exists (don't block legitimate grants
+        # on transient errors).  A real miss returns exists=False above.
+        logger.warning(
+            "SCIM existence check failed for principal %r; assuming exists",
+            principal,
+        )
+        exists = True
+
+    with _principal_cache_lock:
+        _principal_cache[principal] = (exists, time.time())
+    return exists
 
 
 class AccessManagerError(Exception):
@@ -106,16 +162,37 @@ def apply_grants(
     schema_fqns: list[str],
     principals: list[str],
 ) -> AccessGrantResult:
-    """Execute schema grants via the SDK grants API, capturing per-operation failures."""
+    """Execute schema grants via the SDK grants API, capturing per-operation failures.
+
+    Each principal is verified to exist in the workspace SCIM directory
+    before granting.  Non-existent principals are recorded as failures so
+    admins see them at provision/approval time, instead of creating an
+    orphan grant that becomes valid if someone later registers that
+    email/group name.
+    """
     from databricks.sdk.service.catalog import Privilege, SecurableType
 
     granted = 0
     failed: list[tuple[str, str]] = []
 
+    # Pre-check principals once each so we don't hammer SCIM per schema.
+    ws_client = db_client.client
+    valid_principals: list[str] = []
+    for principal in principals:
+        _validate_principal(principal)
+        if _principal_exists(principal, ws_client=ws_client):
+            valid_principals.append(principal)
+        else:
+            msg = (
+                f"Principal {principal!r} not found in workspace SCIM directory; "
+                "refusing to grant."
+            )
+            logger.error(msg)
+            failed.append((principal, msg))
+
     for schema_fqn in schema_fqns:
         _validate_schema_fqn(schema_fqn)
-        for principal in principals:
-            _validate_principal(principal)
+        for principal in valid_principals:
             # Grant USE_SCHEMA
             try:
                 logger.info("Granting USE_SCHEMA on %s to %s", schema_fqn, principal)

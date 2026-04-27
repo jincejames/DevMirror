@@ -182,8 +182,28 @@ def notify_expiring_drs(
 
 
 def _extract_recipients(dr_row: dict[str, Any]) -> list[str]:
-    """Extract notification recipients from a DR row."""
+    """Extract notification recipients from a DR row.
+
+    Every recipient extracted from the stored YAML is filtered through the
+    principal regex (same one ``apply_grants`` uses) so a malformed entry
+    can't slip through to a delivery backend.
+    """
     import yaml
+
+    from devmirror.provision.access_manager import _SAFE_PRINCIPAL
+
+    def _safe(items: list[str] | None) -> list[str]:
+        if not items:
+            return []
+        out: list[str] = []
+        for entry in items:
+            if isinstance(entry, str) and _SAFE_PRINCIPAL.match(entry):
+                out.append(entry)
+            else:
+                logger.warning(
+                    "Dropping malformed notification recipient %r", entry,
+                )
+        return out
 
     config_yaml_str = dr_row.get("config_yaml", "")
     if config_yaml_str:
@@ -194,15 +214,15 @@ def _extract_recipients(dr_row: dict[str, Any]) -> list[str]:
                 lifecycle = dr_section.get("lifecycle", {})
                 recipients = lifecycle.get("notification_recipients")
                 if recipients and isinstance(recipients, list):
-                    return recipients
+                    return _safe(recipients)
                 access = dr_section.get("access", {})
                 developers = access.get("developers")
                 if developers and isinstance(developers, list):
-                    return developers
+                    return _safe(developers)
         except Exception:
             pass
 
     created_by = dr_row.get("created_by", "")
-    if created_by:
+    if created_by and isinstance(created_by, str) and _SAFE_PRINCIPAL.match(created_by):
         return [created_by]
     return []

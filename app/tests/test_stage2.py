@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -376,6 +377,35 @@ class TestTaskTracker:
         time.sleep(0.1)
         assert len(tracker.list_for_dr("DR-1")) == 2
         assert len(tracker.list_for_dr("DR-2")) == 1
+
+    def test_evicts_oldest_completed_over_cap(self):
+        """Oldest completed tasks are evicted once the cap is exceeded."""
+        tracker = TaskTracker(max_tasks=3)
+        # Submit 5 quick-completing tasks; first two should get evicted.
+        for i in range(5):
+            tracker.submit("DR-1", "scan", lambda: None)
+            time.sleep(0.05)
+        # After all submissions + one more eviction pass, at most max_tasks
+        # records remain.
+        assert len(tracker._tasks) <= 3
+
+    def test_running_task_not_evicted(self):
+        """A running task is never dropped, even if cap is exceeded."""
+        slow_done = threading.Event()
+
+        def slow():
+            slow_done.wait(timeout=2.0)
+
+        tracker = TaskTracker(max_tasks=2)
+        slow_id = tracker.submit("DR-1", "scan", slow)
+        # Pile on completed tasks; slow task is still running.
+        for _ in range(5):
+            tracker.submit("DR-1", "scan", lambda: None)
+            time.sleep(0.02)
+        # Slow task survives the eviction.
+        assert tracker.get(slow_id) is not None
+        assert tracker.get(slow_id).status == "running"
+        slow_done.set()
 
 
 # ---- Refresh endpoint tests ----

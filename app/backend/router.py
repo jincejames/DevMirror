@@ -309,8 +309,10 @@ def update_config(
                     status="SUCCESS",
                     action_detail=json.dumps({"changes": changes_audit}),
                 )
-        except Exception:
-            logger.exception("Failed to apply access grants on edit for %s", dr_id)
+        except Exception as exc:
+            # Use logger.error (no exc_info) so config payloads in local
+            # frame variables don't leak via the stack trace.
+            logger.error("Failed to apply access grants on edit for %s: %s", dr_id, exc)
             # Non-fatal: the config row is already saved. Surface via audit.
 
     # Auto-scan if config is valid (not provisioned -- provisioned configs use re-provision)
@@ -430,8 +432,13 @@ def export_config_yaml(
 def search_streams(
     q: str = Query(..., min_length=1, description="Search term for stream names"),
     db_client: DbClient = Depends(get_db_client),
+    _user: str = Depends(get_current_user),
 ) -> StreamSearchResponse:
-    """Search for Databricks jobs and pipelines by name."""
+    """Search for Databricks jobs and pipelines by name.
+
+    Authenticated callers only.  Without this gate, anyone reaching the
+    container could enumerate every workspace job/pipeline name.
+    """
     results: list[StreamSearchResult] = []
 
     try:

@@ -28,12 +28,22 @@ class TaskStatus:
 
 
 class TaskTracker:
-    """Simple in-memory background task system stored on ``app.state``."""
+    """Simple in-memory background task system stored on ``app.state``.
 
-    def __init__(self) -> None:
+    Caps retained tasks so memory doesn't grow unbounded over the app's
+    lifetime.  When the cap is exceeded, the oldest completed/failed
+    tasks are dropped first; running tasks are never evicted.
+    """
+
+    # Keep at most this many task records in memory.  Beyond this we drop
+    # the oldest *completed* tasks first; a running task is never evicted.
+    MAX_TASKS = 500
+
+    def __init__(self, *, max_tasks: int = MAX_TASKS) -> None:
         self._tasks: dict[str, TaskStatus] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._max_tasks = max_tasks
 
     def submit(self, dr_id: str, task_type: str, fn: Callable) -> str:
         """Start *fn* in a background thread and return a task_id."""
@@ -47,6 +57,7 @@ class TaskTracker:
         )
         with self._lock:
             self._tasks[task_id] = task
+            self._evict_old_completed_locked()
         thread = threading.Thread(
             target=self._run, args=(task_id, fn), daemon=True
         )
@@ -54,6 +65,33 @@ class TaskTracker:
         with self._lock:
             self._threads[task_id] = thread
         return task_id
+
+    def _evict_old_completed_locked(self) -> None:
+        """Drop the oldest completed/failed tasks if the cap is exceeded.
+
+        Caller must hold ``self._lock``.  Running tasks are preserved.
+        Tasks are dropped in completed_at order (oldest first).
+        """
+        excess = len(self._tasks) - self._max_tasks
+        if excess <= 0:
+            return
+        # Sort completed/failed tasks by completion time (oldest first).
+        completed = sorted(
+            (
+                (t.completed_at or "", tid)
+                for tid, t in self._tasks.items()
+                if t.status in ("completed", "failed")
+            ),
+        )
+        dropped = 0
+        for _ts, tid in completed:
+            if dropped >= excess:
+                break
+            self._tasks.pop(tid, None)
+            self._threads.pop(tid, None)
+            dropped += 1
+        if dropped:
+            logger.debug("TaskTracker evicted %d completed task(s)", dropped)
 
     def _run(self, task_id: str, fn: Callable) -> None:
         """Execute the task function and update status on completion or failure."""

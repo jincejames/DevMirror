@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _role_cache: dict[str, tuple[str, float]] = {}
 _role_cache_lock = threading.Lock()
-# Lowered from 300s to 120s (Sec finding #7) so admin removal propagates
-# faster.  Admins can also force-flush via POST /api/admin/cache/flush.
+# 120s TTL keeps SCIM lookups cheap while letting admin-group removal
+# propagate within a short window.  Admins can also force-flush via
+# POST /api/admin/cache/flush.
 _CACHE_TTL_SECONDS = 120
 
 

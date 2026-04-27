@@ -60,14 +60,22 @@ def stage_pending_edit(
     requester: str,
     proposed_config_json: str,
     changes: list[dict[str, Any]],
+    original_created_by: str | None = None,
 ) -> str:
-    """Write a CONFIG_EDIT_PENDING audit row and return the pending_edit_id."""
+    """Write a CONFIG_EDIT_PENDING audit row and return the pending_edit_id.
+
+    ``original_created_by`` snapshots the config row's owner at staging
+    time.  The approve endpoint compares this against the live
+    ``created_by`` to detect a delete-and-recreate-with-same-dr_id race
+    (Sec finding #6).
+    """
     from devmirror.utils import now_iso
     pending_edit_id = new_pending_edit_id()
     detail = {
         "pending_edit_id": pending_edit_id,
         "changes": changes,
         "proposed_config_json": proposed_config_json,
+        "original_created_by": original_created_by,
     }
     audit_repo.append(
         db_client,

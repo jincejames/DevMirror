@@ -18,7 +18,10 @@ class TestAuditRepository:
     def _mock_db(self) -> MagicMock:
         m = MagicMock()
         m.sql_exec = MagicMock()
+        m.sql_exec_with_params = MagicMock()
         m.sql = MagicMock(return_value=[])
+        # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
+        m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
         return m
 
     def test_table_fqn(self) -> None:
@@ -40,20 +43,22 @@ class TestAuditRepository:
         )
         assert "INSERT INTO" in sql
         assert "audit_log" in sql
-        assert "log-001" in sql
-        assert "DR-1042" in sql
-        assert "CREATE" in sql
-        assert "user@example.com" in sql
-        assert "SUCCESS" in sql
-        assert '{"key": "value"}' in sql
-        db.sql_exec.assert_called_once_with(sql)
+        db.sql_exec_with_params.assert_called_once()
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert called_sql == sql
+        assert params["log_id"] == "log-001"
+        assert params["dr_id"] == "DR-1042"
+        assert params["action"] == "CREATE"
+        assert params["performed_by"] == "user@example.com"
+        assert params["status"] == "SUCCESS"
+        assert params["action_detail"] == '{"key": "value"}'
 
     def test_append_generates_uuid_when_log_id_omitted(self) -> None:
         repo = AuditRepository(FQN_PREFIX)
         db = self._mock_db()
         with patch("devmirror.control.audit.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value = "fake-uuid-1234"
-            sql = repo.append(
+            repo.append(
                 db,
                 dr_id="DR-1",
                 action="PROVISION",
@@ -61,12 +66,13 @@ class TestAuditRepository:
                 performed_at="2026-04-13T10:00:00Z",
                 status="SUCCESS",
             )
-        assert "fake-uuid-1234" in sql
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["log_id"] == "fake-uuid-1234"
 
     def test_append_null_optional_fields(self) -> None:
         repo = AuditRepository(FQN_PREFIX)
         db = self._mock_db()
-        sql = repo.append(
+        repo.append(
             db,
             dr_id="DR-1",
             action="CLEANUP",
@@ -77,13 +83,15 @@ class TestAuditRepository:
             action_detail=None,
             error_message=None,
         )
-        # Both optional fields should be NULL
-        assert sql.count("NULL") == 2
+        # Both optional fields should be bound as None (driver renders NULL)
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["action_detail"] is None
+        assert params["error_message"] is None
 
     def test_append_with_error_message(self) -> None:
         repo = AuditRepository(FQN_PREFIX)
         db = self._mock_db()
-        sql = repo.append(
+        repo.append(
             db,
             dr_id="DR-1",
             action="PROVISION",
@@ -93,12 +101,14 @@ class TestAuditRepository:
             log_id="log-err",
             error_message="Something went wrong",
         )
-        assert "Something went wrong" in sql
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["error_message"] == "Something went wrong"
 
-    def test_append_escapes_single_quotes(self) -> None:
+    def test_append_passes_quotes_unescaped(self) -> None:
+        """With parameterized queries, callers pass raw strings; the driver handles escaping."""
         repo = AuditRepository(FQN_PREFIX)
         db = self._mock_db()
-        sql = repo.append(
+        repo.append(
             db,
             dr_id="DR-1",
             action="MODIFY",
@@ -107,7 +117,35 @@ class TestAuditRepository:
             status="SUCCESS",
             log_id="log-q",
         )
-        assert "O''Brien" in sql
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["performed_by"] == "O'Brien"
+
+    def test_append_params_shape(self) -> None:
+        """Validate exact params dict shape for regression safety."""
+        repo = AuditRepository(FQN_PREFIX)
+        db = self._mock_db()
+        repo.append(
+            db,
+            dr_id="DR-1042",
+            action="CREATE",
+            performed_by="user@example.com",
+            performed_at="2026-04-13T10:00:00Z",
+            status="SUCCESS",
+            log_id="log-001",
+            action_detail="detail",
+            error_message="err",
+        )
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params == {
+            "log_id": "log-001",
+            "dr_id": "DR-1042",
+            "action": "CREATE",
+            "action_detail": "detail",
+            "performed_by": "user@example.com",
+            "performed_at": "2026-04-13T10:00:00Z",
+            "status": "SUCCESS",
+            "error_message": "err",
+        }
 
     def test_list_by_dr_id(self) -> None:
         repo = AuditRepository(FQN_PREFIX)
@@ -118,17 +156,17 @@ class TestAuditRepository:
         ]
         results = repo.list_by_dr_id(db, dr_id="DR-1042")
         assert len(results) == 2
-        called_sql = db.sql.call_args[0][0]
-        assert "DR-1042" in called_sql
+        called_sql, params = db.sql_with_params.call_args[0]
         assert "ORDER BY performed_at DESC" in called_sql
         assert "LIMIT 500" in called_sql
+        assert params == {"dr_id": "DR-1042"}
 
     def test_list_by_dr_id_custom_limit(self) -> None:
         repo = AuditRepository(FQN_PREFIX)
         db = self._mock_db()
         db.sql.return_value = []
         repo.list_by_dr_id(db, dr_id="DR-1", limit=10)
-        called_sql = db.sql.call_args[0][0]
+        called_sql = db.sql_with_params.call_args[0][0]
         assert "LIMIT 10" in called_sql
 
     def test_list_by_dr_id_empty_result(self) -> None:
@@ -137,6 +175,16 @@ class TestAuditRepository:
         db.sql.return_value = []
         results = repo.list_by_dr_id(db, dr_id="DR-9999")
         assert results == []
+
+    def test_list_by_action_params_shape(self) -> None:
+        repo = AuditRepository(FQN_PREFIX)
+        db = self._mock_db()
+        db.sql.return_value = []
+        repo.list_by_action(db, action="CLEANUP")
+        called_sql, params = db.sql_with_params.call_args[0]
+        assert "WHERE action = :action" in called_sql
+        assert "ORDER BY performed_at DESC" in called_sql
+        assert params == {"action": "CLEANUP"}
 
     def test_purge_old_entries_generates_correct_sql(self) -> None:
         repo = AuditRepository(FQN_PREFIX)

@@ -6,8 +6,6 @@ import logging
 import uuid
 from typing import Any
 
-from devmirror.utils.sql_executor import escape_sql_string as _escape
-
 logger = logging.getLogger(__name__)
 
 
@@ -36,24 +34,25 @@ class AuditRepository:
     ) -> str:
         """Append a single audit entry. Returns the executed SQL."""
         log_id = log_id or str(uuid.uuid4())
-        detail_sql = f"'{_escape(action_detail)}'" if action_detail else "NULL"
-        error_sql = f"'{_escape(error_message)}'" if error_message else "NULL"
-
+        params: dict[str, str | None] = {
+            "log_id": log_id,
+            "dr_id": dr_id,
+            "action": action,
+            "action_detail": action_detail,
+            "performed_by": performed_by,
+            "performed_at": performed_at,
+            "status": status,
+            "error_message": error_message,
+        }
         sql = (
             f"INSERT INTO {self._table} "
-            f"(log_id, dr_id, action, action_detail, performed_by, "
-            f"performed_at, status, error_message) "
-            f"VALUES ("
-            f"'{_escape(log_id)}', "
-            f"'{_escape(dr_id)}', "
-            f"'{_escape(action)}', "
-            f"{detail_sql}, "
-            f"'{_escape(performed_by)}', "
-            f"'{_escape(performed_at)}', "
-            f"'{_escape(status)}', "
-            f"{error_sql})"
+            "(log_id, dr_id, action, action_detail, performed_by, "
+            "performed_at, status, error_message) "
+            "VALUES ("
+            ":log_id, :dr_id, :action, :action_detail, "
+            ":performed_by, :performed_at, :status, :error_message)"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, params)
         return sql
 
     def list_by_dr_id(
@@ -64,13 +63,15 @@ class AuditRepository:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Return audit entries for a DR, ordered by performed_at descending."""
+        # `limit` is int-cast and safe to interpolate; LIMIT clauses are not
+        # parameterizable in Statement Execution API.
         sql = (
             f"SELECT * FROM {self._table} "
-            f"WHERE dr_id = '{_escape(dr_id)}' "
-            f"ORDER BY performed_at DESC "
+            "WHERE dr_id = :dr_id "
+            "ORDER BY performed_at DESC "
             f"LIMIT {int(limit)}"
         )
-        return db_client.sql(sql)
+        return db_client.sql_with_params(sql, {"dr_id": dr_id})
 
     def list_by_action(
         self,
@@ -81,10 +82,10 @@ class AuditRepository:
         """Return all audit entries with a given action, newest first."""
         sql = (
             f"SELECT * FROM {self._table} "
-            f"WHERE action = '{_escape(action)}' "
-            f"ORDER BY performed_at DESC"
+            "WHERE action = :action "
+            "ORDER BY performed_at DESC"
         )
-        return db_client.sql(sql)
+        return db_client.sql_with_params(sql, {"action": action})
 
     def purge_old_entries(
         self,
@@ -92,6 +93,8 @@ class AuditRepository:
         retention_days: int = 365,
     ) -> int:
         """Delete audit entries older than *retention_days*."""
+        # `retention_days` is int-cast and safe to interpolate; DATEADD's
+        # interval offset must be a literal int in Spark SQL.
         sql = (
             f"DELETE FROM {self._table} "
             f"WHERE performed_at < DATEADD(DAY, -{int(retention_days)}, CURRENT_TIMESTAMP())"

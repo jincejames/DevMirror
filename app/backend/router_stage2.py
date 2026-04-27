@@ -12,7 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from .auth import get_user_role, require_admin, require_owner_or_admin
-from .config import get_current_user, get_db_client, get_settings, get_task_tracker
+from .config import (
+    get_current_user,
+    get_db_client,
+    get_settings,
+    get_task_tracker,
+    validate_dr_id,
+)
 from .helpers import (
     _control_repos,
     _get_repo,
@@ -53,7 +59,7 @@ router_stage2 = APIRouter()
     operation_id="scanConfig",
 )
 def scan_config(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
@@ -65,7 +71,7 @@ def scan_config(
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
-    require_owner_or_admin(row, current_user, role)
+    # Admin-gated endpoint; owner check is unreachable here.
 
     if row["status"] == "invalid":
         raise HTTPException(
@@ -103,7 +109,7 @@ def scan_config(
     operation_id="getManifest",
 )
 def get_manifest(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -139,8 +145,8 @@ def get_manifest(
     operation_id="updateManifest",
 )
 def update_manifest(
-    dr_id: str,
     manifest: dict,
+    dr_id: str = Depends(validate_dr_id),
     _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
@@ -152,7 +158,7 @@ def update_manifest(
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
-    require_owner_or_admin(row, current_user, role)
+    # Admin-gated endpoint; owner check is unreachable here.
 
     # Validate minimal manifest structure
     scan_result = manifest.get("scan_result")
@@ -187,7 +193,7 @@ def update_manifest(
     operation_id="provisionConfig",
 )
 def provision_config(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
@@ -202,7 +208,7 @@ def provision_config(
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
-    require_owner_or_admin(row, current_user, role)
+    # Admin-gated endpoint; owner check is unreachable here.
 
     if row["status"] == "invalid":
         raise HTTPException(
@@ -266,11 +272,32 @@ def provision_config(
 def get_task_status(
     task_id: str,
     task_tracker: TaskTracker = Depends(get_task_tracker),
+    db_client: DbClient = Depends(get_db_client),
+    settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+    role: str = Depends(get_user_role),
 ) -> TaskStatusResponse:
-    """Poll for background task status."""
+    """Poll for background task status.
+
+    Ownership: caller must own the task's DR (or be admin).  Otherwise an
+    attacker could enumerate ``task-xxxxxxxx`` IDs to learn other users'
+    DR ids, statuses, and result payloads (which can contain schema names).
+    """
     task = task_tracker.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    # Look up the task's DR to enforce ownership.  If the DR row is gone
+    # (e.g. cleaned up) we fall back to the config row's created_by.
+    repo = _get_repo(settings, db_client)
+    cfg_row = repo.get(db_client, dr_id=task.dr_id)
+    if cfg_row is not None:
+        require_owner_or_admin(cfg_row, current_user, role)
+    else:
+        # No config row -> only admins may view orphaned task results.
+        if role != "admin":
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
     return TaskStatusResponse(
         task_id=task.task_id,
         dr_id=task.dr_id,
@@ -292,7 +319,7 @@ def get_task_status(
     operation_id="getDrStatus",
 )
 def get_dr_status(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -376,7 +403,7 @@ def list_drs(
     operation_id="cleanupDr",
 )
 def cleanup_dr_endpoint(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
@@ -394,7 +421,7 @@ def cleanup_dr_endpoint(
         raise HTTPException(
             status_code=404, detail=f"DR {dr_id} not found in control tables"
         )
-    require_owner_or_admin(dr_row, current_user, role)
+    # Admin-gated endpoint; owner check is unreachable here.
 
     # Guard against concurrent cleanups for the same DR
     running = task_tracker.list_for_dr(dr_id)
@@ -438,8 +465,8 @@ def cleanup_dr_endpoint(
     operation_id="refreshDr",
 )
 def refresh_dr_endpoint(
-    dr_id: str,
     body: RefreshRequest | None = None,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     task_tracker: TaskTracker = Depends(get_task_tracker),
@@ -506,7 +533,7 @@ def refresh_dr_endpoint(
     operation_id="reprovisionDr",
 )
 def reprovision_dr_endpoint(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     _: None = Depends(require_admin),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
@@ -524,7 +551,7 @@ def reprovision_dr_endpoint(
     row = repo.get(db_client, dr_id=dr_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
-    require_owner_or_admin(row, current_user, role)
+    # Admin-gated endpoint; owner check is unreachable here.
 
     # 2. Validate DR is ACTIVE or EXPIRING_SOON in control table
     dr_row = dr_repo.get(db_client, dr_id=dr_id)
@@ -602,8 +629,8 @@ def reprovision_dr_endpoint(
     operation_id="modifyDr",
 )
 def modify_dr_endpoint(
-    dr_id: str,
     body: ModifyDrRequest,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -673,6 +700,7 @@ def modify_dr_endpoint(
                 requester=current_user,
                 proposed_config_json=json.dumps(new_dict),
                 changes=changes,
+                original_created_by=cfg_row.get("created_by"),
             )
             return Response(
                 status_code=202,

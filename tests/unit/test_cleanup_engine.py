@@ -30,7 +30,10 @@ _OBJS = [
 def _mock_db() -> MagicMock:
     m = MagicMock()
     m.sql_exec = MagicMock()
+    m.sql_exec_with_params = MagicMock()
     m.sql = MagicMock(return_value=[])
+    # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
+    m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
     m.delete_table = MagicMock()
     m.delete_schema = MagicMock()
     m.revoke = MagicMock()
@@ -144,5 +147,9 @@ class TestFindExpiredDrs:
     def test_query_criteria(self) -> None:
         db, dr, *_ = _repos()
         find_expired_drs(db, dr)
-        q = db.sql.call_args[0][0]
-        assert "ACTIVE" in q and "CLEANUP_IN_PROGRESS" in q
+        q, params = db.sql_with_params.call_args[0]
+        assert ":active_status" in q and ":cleanup_status" in q
+        assert params == {
+            "active_status": "ACTIVE",
+            "cleanup_status": "CLEANUP_IN_PROGRESS",
+        }

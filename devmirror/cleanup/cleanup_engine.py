@@ -244,13 +244,15 @@ def find_expired_drs(
     dr_repo: DRRepository,
 ) -> list[dict[str, Any]]:
     """Find DRs eligible for cleanup."""
-    from devmirror.utils.sql_executor import escape_sql_string as _escape
-
     table = dr_repo.table_fqn
     sql = (
         f"SELECT * FROM {table} "
-        f"WHERE (expiration_date <= CURRENT_DATE() "
-        f"AND status = '{_escape(DRStatus.ACTIVE.value)}') "
-        f"OR status = '{_escape(DRStatus.CLEANUP_IN_PROGRESS.value)}'"
+        "WHERE (expiration_date <= CURRENT_DATE() "
+        "AND status = :active_status) "
+        "OR status = :cleanup_status"
     )
-    return db_client.sql(sql)
+    params: dict[str, str | None] = {
+        "active_status": DRStatus.ACTIVE.value,
+        "cleanup_status": DRStatus.CLEANUP_IN_PROGRESS.value,
+    }
+    return db_client.sql_with_params(sql, params)

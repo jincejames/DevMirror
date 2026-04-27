@@ -97,16 +97,17 @@ def find_drs_needing_notification(
     notification_days: int = 7,
 ) -> list[dict[str, Any]]:
     """Find active DRs in the notification window that have not been notified."""
-    from devmirror.utils.sql_executor import escape_sql_string as _escape
-
     table = dr_repo.table_fqn
+    # `notification_days` is int-cast and safe to interpolate. DATE_SUB's
+    # second argument must be an integer literal in Spark SQL; the Statement
+    # Execution API stringifies bind params, which Spark won't coerce here.
     sql = (
         f"SELECT * FROM {table} "
         f"WHERE DATE_SUB(expiration_date, {int(notification_days)}) <= CURRENT_DATE() "
-        f"AND notification_sent_at IS NULL "
-        f"AND status = '{_escape('ACTIVE')}'"
+        "AND notification_sent_at IS NULL "
+        "AND status = :status"
     )
-    return db_client.sql(sql)
+    return db_client.sql_with_params(sql, {"status": "ACTIVE"})
 
 
 def notify_expiring_drs(

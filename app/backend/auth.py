@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
+
+# Strict email shape used as a SCIM-filter safety gate.  We refuse to call
+# the users.list filter API with anything that doesn't match this -- it
+# defends against SCIM filter injection regardless of how individual SDK
+# versions escape internally.
+_EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +24,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _role_cache: dict[str, tuple[str, float]] = {}
 _role_cache_lock = threading.Lock()
-_CACHE_TTL_SECONDS = 300  # 5 minutes
+# Lowered from 300s to 120s (Sec finding #7) so admin removal propagates
+# faster.  Admins can also force-flush via POST /api/admin/cache/flush.
+_CACHE_TTL_SECONDS = 120
+
+
+def flush_role_cache() -> int:
+    """Drop every cached role.  Returns the number of entries cleared.
+
+    Used by the admin flush endpoint so incident response can revoke
+    privileges without waiting for the TTL.
+    """
+    with _role_cache_lock:
+        n = len(_role_cache)
+        _role_cache.clear()
+        return n
 
 
 # ---------------------------------------------------------------------------
@@ -83,13 +104,21 @@ def _resolve_role(email: str) -> str:
         ws = WorkspaceClient()
         email_lc = email.lower()
 
-        # 1. Resolve email -> user ID via SCIM users API
-        # SCIM filter strings need single quotes escaped
-        safe_email = email.replace("'", r"\'")
-        users = list(ws.users.list(filter=f"userName eq '{safe_email}'"))
+        # 1. Resolve email -> user ID via SCIM users API.  Guard against
+        # SCIM filter injection: refuse to build the filter at all if the
+        # email contains anything outside the strict pattern.  Any quote,
+        # CRLF, or operator-like substring trips the regex and we fall
+        # through to the display-string fallback paths below.
         user_id: str | None = None
-        if users:
-            user_id = str(getattr(users[0], "id", "") or "")
+        if _EMAIL_PATTERN.match(email):
+            users = list(ws.users.list(filter=f"userName eq '{email}'"))
+            if users:
+                user_id = str(getattr(users[0], "id", "") or "")
+        else:
+            logger.warning(
+                "Refusing SCIM users.list with non-conforming email; "
+                "falling back to display match",
+            )
 
         # 2. Find the admin group, then fetch full detail (list may omit members)
         groups = list(ws.groups.list(filter=f"displayName eq '{admin_group}'"))

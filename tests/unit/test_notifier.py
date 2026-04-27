@@ -39,7 +39,10 @@ class _FakeBackend:
 def _mock_db(rows=None) -> MagicMock:
     m = MagicMock()
     m.sql_exec = MagicMock()
+    m.sql_exec_with_params = MagicMock()
     m.sql = MagicMock(return_value=rows or [])
+    # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
+    m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
     return m
 
 
@@ -83,8 +86,16 @@ class TestFindDrs:
     def test_query_criteria(self) -> None:
         db, dr, *_ = _repos()
         find_drs_needing_notification(db, dr, notification_days=14)
-        q = db.sql.call_args[0][0]
+        q, params = db.sql_with_params.call_args[0]
         assert "notification_sent_at IS NULL" in q and "14" in q
+        assert params == {"status": "ACTIVE"}
+
+    def test_params_shape(self) -> None:
+        db, dr, *_ = _repos()
+        find_drs_needing_notification(db, dr, notification_days=7)
+        q, params = db.sql_with_params.call_args[0]
+        assert "DATE_SUB(expiration_date, 7)" in q
+        assert params == {"status": "ACTIVE"}
 
 
 class TestNotifyExpiringDrs:

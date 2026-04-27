@@ -108,6 +108,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="DevMirror", version="0.1.0", lifespan=lifespan)
 
+
+@app.exception_handler(Exception)
+async def _generic_exception_handler(request, exc):
+    """Catch-all 500 handler that doesn't leak internals to the client.
+
+    HTTPExceptions (400/401/403/404/409/etc.) bypass this handler and go
+    through FastAPI's normal path, so deliberate user-facing messages
+    still surface.  Anything that raises an unexpected exception (SQL
+    error, KeyError, etc.) returns a generic 500 with no detail; the
+    real exception is logged server-side for ops to inspect.
+    """
+    from fastapi import HTTPException as _HTTP
+
+    if isinstance(exc, _HTTP):
+        # Let FastAPI's default handler take it.
+        raise exc
+    logger.error("Unhandled exception on %s %s", request.method, request.url.path, exc_info=exc)
+    from fastapi.responses import JSONResponse as _JSONResponse
+    return _JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. See server logs for details."},
+    )
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Add baseline security headers on every response.
+
+    Databricks Apps' reverse proxy may add some headers, but we don't
+    rely on that.  Closes clickjacking + MIME-sniffing surface.
+    """
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 # API routes (must be registered BEFORE the static file mount)
 app.include_router(router, prefix="/api")
 app.include_router(router_stage2, prefix="/api")

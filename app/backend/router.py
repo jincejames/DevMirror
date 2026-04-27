@@ -13,7 +13,7 @@ from fastapi.responses import Response
 from devmirror.modify.modification_engine import _manage_users
 
 from .auth import UserInfo, get_user_role, require_owner_or_admin
-from .config import get_current_user, get_db_client, get_settings
+from .config import get_current_user, get_db_client, get_settings, validate_dr_id
 from .helpers import (
     _auto_scan,
     _build_yaml,
@@ -148,7 +148,7 @@ def list_configs(
     operation_id="getConfig",
 )
 def get_config(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -171,8 +171,8 @@ def get_config(
     operation_id="updateConfig",
 )
 def update_config(
-    dr_id: str,
     config_in: ConfigIn,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -212,6 +212,7 @@ def update_config(
             requester=current_user,
             proposed_config_json=config_in.model_dump_json(),
             changes=changes,
+            original_created_by=existing.get("created_by"),
         )
         return Response(
             status_code=202,
@@ -330,7 +331,7 @@ def update_config(
     operation_id="deleteConfig",
 )
 def delete_config(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -359,7 +360,7 @@ def delete_config(
     operation_id="revalidateConfig",
 )
 def revalidate_config(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),
@@ -398,7 +399,7 @@ def revalidate_config(
     operation_id="exportConfigYaml",
 )
 def export_config_yaml(
-    dr_id: str,
+    dr_id: str = Depends(validate_dr_id),
     db_client: DbClient = Depends(get_db_client),
     settings: Settings = Depends(get_settings),
     current_user: str = Depends(get_current_user),

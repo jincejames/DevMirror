@@ -6,16 +6,20 @@ from enum import StrEnum
 from importlib import resources as importlib_resources
 from typing import TYPE_CHECKING, Any
 
-from devmirror.utils.sql_executor import escape_sql_string as _escape
-
 if TYPE_CHECKING:
     from devmirror.settings import Settings
     from devmirror.utils.db_client import DbClient as _DbClient
 
 
-def _sql_val(v: Any) -> str:
-    """Format a value for SQL: NULL if None, else escaped string literal."""
-    return "NULL" if v is None else f"'{_escape(str(v))}'"
+def _param_or_null(params: dict[str, str | None], key: str, value: Any) -> str:
+    """Bind value to params[key] and return ``:key``; or ``NULL`` if value is None.
+
+    Returned value is the SQL fragment to embed in the statement.
+    """
+    if value is None:
+        return "NULL"
+    params[key] = str(value)
+    return f":{key}"
 
 
 def _load_ddl_template() -> str:
@@ -169,16 +173,27 @@ class DRRepository:
         last_modified_at: str | None = None,
     ) -> str:
         """Insert a new DR row.  Returns the generated SQL."""
+        params: dict[str, str | None] = {}
+        desc_expr = _param_or_null(params, "description", description)
+        config_expr = _param_or_null(params, "config_yaml", config_yaml)
+        last_mod_expr = _param_or_null(params, "last_modified_at", last_modified_at)
+        params.update({
+            "dr_id": dr_id,
+            "status": status,
+            "created_at": created_at,
+            "created_by": created_by,
+            "expiration_date": expiration_date,
+        })
         sql = (
             f"INSERT INTO {self._table} "
-            f"(dr_id, description, status, config_yaml, created_at, created_by, "
-            f"expiration_date, last_refreshed_at, last_modified_at, notification_sent_at) "
-            f"VALUES ("
-            f"'{_escape(dr_id)}', {_sql_val(description)}, '{_escape(status)}', "
-            f"{_sql_val(config_yaml)}, '{_escape(created_at)}', '{_escape(created_by)}', "
-            f"'{_escape(expiration_date)}', NULL, {_sql_val(last_modified_at)}, NULL)"
+            "(dr_id, description, status, config_yaml, created_at, created_by, "
+            "expiration_date, last_refreshed_at, last_modified_at, notification_sent_at) "
+            "VALUES ("
+            f":dr_id, {desc_expr}, :status, "
+            f"{config_expr}, :created_at, :created_by, "
+            f":expiration_date, NULL, {last_mod_expr}, NULL)"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, params)
         return sql
 
     def update_status(
@@ -194,31 +209,39 @@ class DRRepository:
         validate_dr_status_transition(current_status, new_status)
         sql = (
             f"UPDATE {self._table} SET "
-            f"status = '{new_status.value}', "
-            f"last_modified_at = '{_escape(last_modified_at)}' "
-            f"WHERE dr_id = '{_escape(dr_id)}' "
-            f"AND status = '{current_status.value}'"
+            "status = :new_status, "
+            "last_modified_at = :last_modified_at "
+            "WHERE dr_id = :dr_id "
+            "AND status = :current_status"
         )
-        db_client.sql_exec(sql)
+        params: dict[str, str | None] = {
+            "dr_id": dr_id,
+            "new_status": new_status.value,
+            "current_status": current_status.value,
+            "last_modified_at": last_modified_at,
+        }
+        db_client.sql_exec_with_params(sql, params)
         return sql
 
     def get(self, db_client: Any, *, dr_id: str) -> dict[str, Any] | None:
         """Fetch a single DR row by id, or ``None`` if not found."""
-        sql = f"SELECT * FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        rows = db_client.sql(sql)
+        sql = f"SELECT * FROM {self._table} WHERE dr_id = :dr_id"
+        rows = db_client.sql_with_params(sql, {"dr_id": dr_id})
         return rows[0] if rows else None
 
     def list_active(self, db_client: Any) -> list[dict[str, Any]]:
         """Return all DRs in active-ish states (for collision checks)."""
-        active_states = (
-            DRStatus.PENDING_REVIEW.value,
-            DRStatus.PROVISIONING.value,
-            DRStatus.ACTIVE.value,
-            DRStatus.EXPIRING_SOON.value,
+        params: dict[str, str | None] = {
+            "s_pending": DRStatus.PENDING_REVIEW.value,
+            "s_provisioning": DRStatus.PROVISIONING.value,
+            "s_active": DRStatus.ACTIVE.value,
+            "s_expiring": DRStatus.EXPIRING_SOON.value,
+        }
+        sql = (
+            f"SELECT * FROM {self._table} "
+            "WHERE status IN (:s_pending, :s_provisioning, :s_active, :s_expiring)"
         )
-        in_clause = ", ".join(f"'{s}'" for s in active_states)
-        sql = f"SELECT * FROM {self._table} WHERE status IN ({in_clause})"
-        return db_client.sql(sql)
+        return db_client.sql_with_params(sql, params)
 
     def update_notification_sent(
         self,
@@ -230,10 +253,14 @@ class DRRepository:
         """Record that the expiry notification was sent."""
         sql = (
             f"UPDATE {self._table} SET "
-            f"notification_sent_at = '{_escape(notification_sent_at)}' "
-            f"WHERE dr_id = '{_escape(dr_id)}'"
+            "notification_sent_at = :notification_sent_at "
+            "WHERE dr_id = :dr_id"
         )
-        db_client.sql_exec(sql)
+        params: dict[str, str | None] = {
+            "dr_id": dr_id,
+            "notification_sent_at": notification_sent_at,
+        }
+        db_client.sql_exec_with_params(sql, params)
         return sql
 
 
@@ -256,24 +283,44 @@ class DrObjectRepository:
         """Insert multiple object rows. Returns the list of SQL executed."""
         statements: list[str] = []
         for obj in objects:
+            params: dict[str, str | None] = {}
+            clone_rev_expr = _param_or_null(
+                params, "clone_revision_value", obj.get("clone_revision_value")
+            )
+            provisioned_expr = _param_or_null(
+                params, "provisioned_at", obj.get("provisioned_at")
+            )
+            last_refreshed_expr = _param_or_null(
+                params, "last_refreshed_at", obj.get("last_refreshed_at")
+            )
             est_gb = obj.get("estimated_size_gb")
-            est_gb_sql = str(est_gb) if est_gb is not None else "NULL"
+            # estimated_size_gb is numeric; safe to interpolate (None -> NULL else float)
+            est_gb_sql = "NULL" if est_gb is None else str(float(est_gb))
+            params.update({
+                "dr_id": str(obj["dr_id"]),
+                "source_fqn": str(obj["source_fqn"]),
+                "target_fqn": str(obj["target_fqn"]),
+                "target_environment": str(obj["target_environment"]),
+                "object_type": str(obj["object_type"]),
+                "access_mode": str(obj["access_mode"]),
+                "clone_strategy": str(obj["clone_strategy"]),
+                "clone_revision_mode": str(obj["clone_revision_mode"]),
+                "status": str(obj["status"]),
+            })
             sql = (
                 f"INSERT INTO {self._table} "
-                f"(dr_id, source_fqn, target_fqn, target_environment, object_type, "
-                f"access_mode, clone_strategy, clone_revision_mode, clone_revision_value, "
-                f"provisioned_at, last_refreshed_at, status, estimated_size_gb) "
-                f"VALUES ("
-                f"'{_escape(obj['dr_id'])}', '{_escape(obj['source_fqn'])}', "
-                f"'{_escape(obj['target_fqn'])}', '{_escape(obj['target_environment'])}', "
-                f"'{_escape(obj['object_type'])}', '{_escape(obj['access_mode'])}', "
-                f"'{_escape(obj['clone_strategy'])}', '{_escape(obj['clone_revision_mode'])}', "
-                f"{_sql_val(obj.get('clone_revision_value'))}, "
-                f"{_sql_val(obj.get('provisioned_at'))}, "
-                f"{_sql_val(obj.get('last_refreshed_at'))}, "
-                f"'{_escape(obj['status'])}', {est_gb_sql})"
+                "(dr_id, source_fqn, target_fqn, target_environment, object_type, "
+                "access_mode, clone_strategy, clone_revision_mode, clone_revision_value, "
+                "provisioned_at, last_refreshed_at, status, estimated_size_gb) "
+                "VALUES ("
+                ":dr_id, :source_fqn, :target_fqn, :target_environment, :object_type, "
+                ":access_mode, :clone_strategy, :clone_revision_mode, "
+                f"{clone_rev_expr}, "
+                f"{provisioned_expr}, "
+                f"{last_refreshed_expr}, "
+                f":status, {est_gb_sql})"
             )
-            db_client.sql_exec(sql)
+            db_client.sql_exec_with_params(sql, params)
             statements.append(sql)
         return statements
 
@@ -290,31 +337,39 @@ class DrObjectRepository:
     ) -> str:
         """Update a single object row's status with transition validation."""
         validate_object_status_transition(current_status, new_status)
-        set_parts = [f"status = '{new_status.value}'"]
+        params: dict[str, str | None] = {
+            "dr_id": dr_id,
+            "source_fqn": source_fqn,
+            "target_environment": target_environment,
+            "current_status": current_status.value,
+            "new_status": new_status.value,
+        }
+        set_parts = ["status = :new_status"]
         if last_refreshed_at:
-            set_parts.append(f"last_refreshed_at = '{_escape(last_refreshed_at)}'")
+            set_parts.append("last_refreshed_at = :last_refreshed_at")
+            params["last_refreshed_at"] = last_refreshed_at
         set_clause = ", ".join(set_parts)
         sql = (
             f"UPDATE {self._table} SET {set_clause} "
-            f"WHERE dr_id = '{_escape(dr_id)}' "
-            f"AND source_fqn = '{_escape(source_fqn)}' "
-            f"AND target_environment = '{_escape(target_environment)}' "
-            f"AND status = '{current_status.value}'"
+            "WHERE dr_id = :dr_id "
+            "AND source_fqn = :source_fqn "
+            "AND target_environment = :target_environment "
+            "AND status = :current_status"
         )
-        db_client.sql_exec(sql)
+        db_client.sql_exec_with_params(sql, params)
         return sql
 
     def list_by_dr_id(
         self, db_client: Any, *, dr_id: str
     ) -> list[dict[str, Any]]:
         """Return all object rows for a given DR."""
-        sql = f"SELECT * FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        return db_client.sql(sql)
+        sql = f"SELECT * FROM {self._table} WHERE dr_id = :dr_id"
+        return db_client.sql_with_params(sql, {"dr_id": dr_id})
 
     def delete_by_dr_id(self, db_client: Any, *, dr_id: str) -> str:
         """Delete all object rows for a DR (used before re-provisioning)."""
-        sql = f"DELETE FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        db_client.sql_exec(sql)
+        sql = f"DELETE FROM {self._table} WHERE dr_id = :dr_id"
+        db_client.sql_exec_with_params(sql, {"dr_id": dr_id})
         return sql
 
 
@@ -337,17 +392,20 @@ class DrAccessRepository:
         """Insert multiple access grant rows."""
         statements: list[str] = []
         for row in rows:
+            params: dict[str, str | None] = {
+                "dr_id": row["dr_id"],
+                "user_email": row["user_email"],
+                "environment": row["environment"],
+                "access_level": row["access_level"],
+                "granted_at": row["granted_at"],
+            }
             sql = (
                 f"INSERT INTO {self._table} "
-                f"(dr_id, user_email, environment, access_level, granted_at) "
-                f"VALUES ("
-                f"'{_escape(row['dr_id'])}', "
-                f"'{_escape(row['user_email'])}', "
-                f"'{_escape(row['environment'])}', "
-                f"'{_escape(row['access_level'])}', "
-                f"'{_escape(row['granted_at'])}')"
+                "(dr_id, user_email, environment, access_level, granted_at) "
+                "VALUES ("
+                ":dr_id, :user_email, :environment, :access_level, :granted_at)"
             )
-            db_client.sql_exec(sql)
+            db_client.sql_exec_with_params(sql, params)
             statements.append(sql)
         return statements
 
@@ -355,11 +413,11 @@ class DrAccessRepository:
         self, db_client: Any, *, dr_id: str
     ) -> list[dict[str, Any]]:
         """Return all access rows for a given DR."""
-        sql = f"SELECT * FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        return db_client.sql(sql)
+        sql = f"SELECT * FROM {self._table} WHERE dr_id = :dr_id"
+        return db_client.sql_with_params(sql, {"dr_id": dr_id})
 
     def delete_by_dr_id(self, db_client: Any, *, dr_id: str) -> str:
         """Delete all access rows for a DR (used before re-insert on modification)."""
-        sql = f"DELETE FROM {self._table} WHERE dr_id = '{_escape(dr_id)}'"
-        db_client.sql_exec(sql)
+        sql = f"DELETE FROM {self._table} WHERE dr_id = :dr_id"
+        db_client.sql_exec_with_params(sql, {"dr_id": dr_id})
         return sql

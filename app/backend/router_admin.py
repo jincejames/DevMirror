@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .approvals import find_pending, list_pending
-from .auth import require_admin
+from .auth import flush_role_cache, require_admin
 from .config import get_current_user, get_db_client, get_settings
 from .helpers import _build_yaml, _control_repos, _get_repo
 
@@ -163,6 +163,22 @@ def approve_edit(
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
 
+    # Drift check: if the original requester (or the row's created_by) has
+    # changed since the edit was staged, the row was likely deleted and
+    # recreated.  Refuse to apply -- the admin should reject and ask the
+    # current owner to re-submit.
+    original_created_by = detail.get("original_created_by")
+    current_created_by = existing.get("created_by")
+    if original_created_by is not None and original_created_by != current_created_by:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Config {dr_id} owner changed since this edit was staged "
+                f"({original_created_by!r} -> {current_created_by!r}). "
+                "Reject this pending edit and ask the current owner to re-submit."
+            ),
+        )
+
     old_dict = json.loads(existing["config_json"])
     new_dict = json.loads(proposed_json)
 
@@ -290,4 +306,39 @@ def reject_edit(
         pending_edit_id=pending_edit_id,
         status="rejected",
         message="Edit rejected.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/cache/flush  (Sec finding #7)
+# ---------------------------------------------------------------------------
+
+
+class FlushCacheResponse(BaseModel):
+    cleared: int
+    message: str
+
+
+@router_admin.post(
+    "/admin/cache/flush",
+    response_model=FlushCacheResponse,
+    operation_id="flushRoleCache",
+)
+def flush_cache(
+    current_user: str = Depends(get_current_user),
+    _: None = Depends(require_admin),
+) -> FlushCacheResponse:
+    """Force-clear the role cache so revoked admins lose privileges immediately.
+
+    The role cache (5-min TTL by default, lowered to 2 min) keeps a per-email
+    admin/user role mapping to avoid hammering SCIM.  In incident response
+    scenarios, an admin can call this endpoint to evict the cache without
+    waiting for the TTL.
+    """
+    cleared = flush_role_cache()
+    logger.warning(
+        "Role cache flushed by %s; %d entries cleared", current_user, cleared
+    )
+    return FlushCacheResponse(
+        cleared=cleared, message=f"Cleared {cleared} cached role(s).",
     )

@@ -25,7 +25,10 @@ FQN = "dev_analytics.devmirror_admin"
 def _mock_db() -> MagicMock:
     m = MagicMock()
     m.sql_exec = MagicMock()
+    m.sql_exec_with_params = MagicMock()
     m.sql = MagicMock(return_value=[])
+    # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
+    m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
     return m
 
 
@@ -91,34 +94,74 @@ class TestDRRepository:
         sql = repo.insert(db, dr_id="DR-1", description="Test", status="PENDING_REVIEW",
                           config_yaml=None, created_at="2026-01-01T00:00:00Z",
                           created_by="u@x.com", expiration_date="2026-06-15")
-        assert "INSERT INTO" in sql and "DR-1" in sql
-        db.sql_exec.assert_called_once()
+        assert "INSERT INTO" in sql
+        db.sql_exec_with_params.assert_called_once()
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert called_sql == sql
+        assert params["dr_id"] == "DR-1"
+        assert params["description"] == "Test"
+        assert params["status"] == "PENDING_REVIEW"
+        assert params["created_by"] == "u@x.com"
+        # config_yaml and last_modified_at are None -> rendered as NULL, not bound
+        assert "config_yaml" not in params
+        assert "last_modified_at" not in params
+        assert ", NULL," in sql or "NULL," in sql  # NULL literal present
 
-    def test_insert_escapes_quotes(self) -> None:
+    def test_insert_passes_quotes_unescaped(self) -> None:
+        """With parameterized queries, the driver handles quote escaping."""
         repo, db = DRRepository(FQN), _mock_db()
-        sql = repo.insert(db, dr_id="DR-1", description="It's", status="PENDING_REVIEW",
-                          config_yaml=None, created_at="2026-01-01T00:00:00Z",
-                          created_by="u@x.com", expiration_date="2026-06-15")
-        assert "It''s" in sql
+        repo.insert(db, dr_id="DR-1", description="It's", status="PENDING_REVIEW",
+                    config_yaml=None, created_at="2026-01-01T00:00:00Z",
+                    created_by="u@x.com", expiration_date="2026-06-15")
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["description"] == "It's"
+
+    def test_insert_params_shape(self) -> None:
+        repo, db = DRRepository(FQN), _mock_db()
+        repo.insert(db, dr_id="DR-1", description="Test", status="PENDING_REVIEW",
+                    config_yaml="cfg: 1", created_at="2026-01-01T00:00:00Z",
+                    created_by="u@x.com", expiration_date="2026-06-15",
+                    last_modified_at="2026-02-01T00:00:00Z")
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params == {
+            "dr_id": "DR-1",
+            "description": "Test",
+            "status": "PENDING_REVIEW",
+            "config_yaml": "cfg: 1",
+            "created_at": "2026-01-01T00:00:00Z",
+            "created_by": "u@x.com",
+            "expiration_date": "2026-06-15",
+            "last_modified_at": "2026-02-01T00:00:00Z",
+        }
 
     def test_update_status(self) -> None:
         repo, db = DRRepository(FQN), _mock_db()
-        sql = repo.update_status(db, dr_id="DR-1", current_status=DRStatus.PENDING_REVIEW,
-                                 new_status=DRStatus.PROVISIONING, last_modified_at="now")
-        assert "PROVISIONING" in sql
-        db.sql_exec.assert_called_once()
+        repo.update_status(db, dr_id="DR-1", current_status=DRStatus.PENDING_REVIEW,
+                           new_status=DRStatus.PROVISIONING, last_modified_at="now")
+        db.sql_exec_with_params.assert_called_once()
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert "status = :new_status" in called_sql
+        assert params == {
+            "dr_id": "DR-1",
+            "new_status": "PROVISIONING",
+            "current_status": "PENDING_REVIEW",
+            "last_modified_at": "now",
+        }
 
     def test_update_status_invalid(self) -> None:
         repo, db = DRRepository(FQN), _mock_db()
         with pytest.raises(StatusTransitionError):
             repo.update_status(db, dr_id="DR-1", current_status=DRStatus.CLEANED_UP,
                                new_status=DRStatus.ACTIVE, last_modified_at="now")
-        db.sql_exec.assert_not_called()
+        db.sql_exec_with_params.assert_not_called()
 
     def test_get_found_and_missing(self) -> None:
         repo, db = DRRepository(FQN), _mock_db()
         db.sql.return_value = [{"dr_id": "DR-1"}]
         assert repo.get(db, dr_id="DR-1") is not None
+        called_sql, params = db.sql_with_params.call_args[0]
+        assert ":dr_id" in called_sql
+        assert params == {"dr_id": "DR-1"}
         db.sql.return_value = []
         assert repo.get(db, dr_id="DR-99") is None
 
@@ -126,8 +169,21 @@ class TestDRRepository:
         repo, db = DRRepository(FQN), _mock_db()
         db.sql.return_value = [{"dr_id": "DR-1"}]
         assert len(repo.list_active(db)) == 1
-        sql = db.sql.call_args[0][0]
-        assert "ACTIVE" in sql and "CLEANED_UP" not in sql
+        called_sql, params = db.sql_with_params.call_args[0]
+        assert "status IN (:s_pending, :s_provisioning, :s_active, :s_expiring)" in called_sql
+        assert params == {
+            "s_pending": "PENDING_REVIEW",
+            "s_provisioning": "PROVISIONING",
+            "s_active": "ACTIVE",
+            "s_expiring": "EXPIRING_SOON",
+        }
+
+    def test_update_notification_sent_params(self) -> None:
+        repo, db = DRRepository(FQN), _mock_db()
+        repo.update_notification_sent(db, dr_id="DR-1", notification_sent_at="2026-04-01T00:00:00Z")
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert ":notification_sent_at" in called_sql
+        assert params == {"dr_id": "DR-1", "notification_sent_at": "2026-04-01T00:00:00Z"}
 
 
 # ------------------------------------------------------------------
@@ -146,14 +202,35 @@ class TestDrObjectRepository:
         repo, db = DrObjectRepository(FQN), _mock_db()
         stmts = repo.bulk_insert(db, objects=[_SAMPLE_OBJ])
         assert len(stmts) == 1 and "INSERT INTO" in stmts[0]
+        db.sql_exec_with_params.assert_called_once()
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["dr_id"] == "DR-1"
+        assert params["source_fqn"] == "p.s.t"
+        assert params["status"] == "PROVISIONED"
+        # Optional fields are None -> not bound, NULL in SQL
+        assert "clone_revision_value" not in params
+
+    def test_bulk_insert_params_shape(self) -> None:
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        obj = {**_SAMPLE_OBJ, "provisioned_at": "2026-04-01T00:00:00Z",
+               "estimated_size_gb": 2.5}
+        repo.bulk_insert(db, objects=[obj])
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["provisioned_at"] == "2026-04-01T00:00:00Z"
+        # estimated_size_gb is interpolated as numeric literal, not bound
+        assert "estimated_size_gb" not in params
+        assert "2.5" in db.sql_exec_with_params.call_args[0][0]
 
     def test_update_status(self) -> None:
         repo, db = DrObjectRepository(FQN), _mock_db()
-        sql = repo.update_object_status(db, dr_id="DR-1", source_fqn="p.s.t",
-                                        target_environment="dev",
-                                        current_status=ObjectStatus.PROVISIONED,
-                                        new_status=ObjectStatus.REFRESH_PENDING)
-        assert "REFRESH_PENDING" in sql
+        repo.update_object_status(db, dr_id="DR-1", source_fqn="p.s.t",
+                                  target_environment="dev",
+                                  current_status=ObjectStatus.PROVISIONED,
+                                  new_status=ObjectStatus.REFRESH_PENDING)
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert ":new_status" in called_sql
+        assert params["new_status"] == "REFRESH_PENDING"
+        assert params["current_status"] == "PROVISIONED"
 
     def test_update_status_invalid(self) -> None:
         repo, db = DrObjectRepository(FQN), _mock_db()
@@ -162,6 +239,21 @@ class TestDrObjectRepository:
                                       target_environment="dev",
                                       current_status=ObjectStatus.DROPPED,
                                       new_status=ObjectStatus.PROVISIONED)
+
+    def test_list_by_dr_id_params(self) -> None:
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        db.sql.return_value = []
+        repo.list_by_dr_id(db, dr_id="DR-1")
+        called_sql, params = db.sql_with_params.call_args[0]
+        assert ":dr_id" in called_sql
+        assert params == {"dr_id": "DR-1"}
+
+    def test_delete_by_dr_id_params(self) -> None:
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        repo.delete_by_dr_id(db, dr_id="DR-1")
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert "DELETE FROM" in called_sql
+        assert params == {"dr_id": "DR-1"}
 
 
 # ------------------------------------------------------------------
@@ -177,6 +269,30 @@ class TestDrAccessRepository:
         repo, db = DrAccessRepository(FQN), _mock_db()
         stmts = repo.bulk_insert(db, rows=[_SAMPLE_ROW])
         assert len(stmts) == 1 and "INSERT INTO" in stmts[0]
+        db.sql_exec_with_params.assert_called_once()
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params == {
+            "dr_id": "DR-1",
+            "user_email": "a@x.com",
+            "environment": "dev",
+            "access_level": "READ_WRITE",
+            "granted_at": "2026-01-01T00:00:00Z",
+        }
+
+    def test_list_by_dr_id_params(self) -> None:
+        repo, db = DrAccessRepository(FQN), _mock_db()
+        db.sql.return_value = []
+        repo.list_by_dr_id(db, dr_id="DR-1")
+        called_sql, params = db.sql_with_params.call_args[0]
+        assert ":dr_id" in called_sql
+        assert params == {"dr_id": "DR-1"}
+
+    def test_delete_by_dr_id_params(self) -> None:
+        repo, db = DrAccessRepository(FQN), _mock_db()
+        repo.delete_by_dr_id(db, dr_id="DR-1")
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        assert "DELETE FROM" in called_sql
+        assert params == {"dr_id": "DR-1"}
 
 
 

@@ -6,14 +6,62 @@ variables:
     description: SQL warehouse ID (optional, only needed for remote execution without a cluster)
   node_type_id:
     description: Instance type for job clusters (e.g. i3.xlarge, Standard_DS3_v2)
+  run_as_sp:
+    description: Service principal application_id the lifecycle job runs as (prod only)
+    default: ""
+  app_name:
+    description: Databricks App resource name (must be lowercase alnum + hyphens)
+    default: devmirror
+  control_catalog:
+    description: Catalog where the DevMirror control / config tables live
+    default: dev_analytics
+  control_schema:
+    description: Schema where the DevMirror control / config tables live
+    default: devmirror_admin
+  admin_group:
+    description: Account-level group whose members get the admin role in the app
+    default: devmirror-admins
+  smtp_password_secret:
+    description: Databricks Apps Secret resource key for DEVMIRROR_SMTP_PASSWORD
+    default: ""
+  teams_webhook_secret:
+    description: Databricks Apps Secret resource key for DEVMIRROR_TEAMS_WEBHOOK_URL
+    default: ""
+
+# ---------------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------------
+# Workspace host is taken from the Databricks CLI profile passed via
+# `--profile <name>` (or `DATABRICKS_CONFIG_PROFILE`).  The bundle deployer
+# is responsible for selecting the right profile per environment.
+#
+# `run_as.service_principal_name` on prod ensures the lifecycle job executes
+# as a stable service principal regardless of who deploys.  In dev, the
+# job runs as the bundle deployer for fast iteration.  Override either
+# default via `--var run_as_sp=<app-id>` on the bundle command.
+# ---------------------------------------------------------------------------
 
 targets:
   dev:
     mode: development
     default: true
+    # No run_as -> job runs as the deploying user (typical for dev iteration).
 
   prod:
     mode: production
+    workspace:
+      # Pin a stable root_path under the run-as service principal's home so
+      # different deployers don't clobber each other's prod resources, and
+      # so the artifacts inherit the SP's permissions (not /Shared which
+      # is world-readable).
+      root_path: /Workspace/Users/${var.run_as_sp}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      # Replace this placeholder with the prod service principal's
+      # application_id, or override at deploy time:
+      #   databricks bundle deploy --target prod --var run_as_sp=<app-id>
+      run_as_sp: <prod-sp-app-id>
+    run_as:
+      service_principal_name: ${var.run_as_sp}
 
 artifacts:
   devmirror_wheel:
@@ -67,3 +115,30 @@ resources:
             entry_point: devmirror-audit-purge
           libraries:
             - whl: ./dist/*.whl
+
+  # -------------------------------------------------------------------------
+  # Databricks App: FastAPI backend + React frontend
+  # -------------------------------------------------------------------------
+  # Run `./scripts/build_app.sh` BEFORE `databricks bundle deploy`.  That
+  # script builds the React frontend into app/backend/static/ and copies the
+  # devmirror engine package into app/devmirror/ so the FastAPI imports
+  # resolve at runtime.  After bundle deploy, run `databricks apps deploy
+  # devmirror` to start a deployment from the just-uploaded source.
+  # -------------------------------------------------------------------------
+  apps:
+    devmirror:
+      name: ${var.app_name}
+      source_code_path: ./app
+      description: DevMirror -- UC dev environment cloning
+      config:
+        # Overrides the env block in app/app.yaml at deploy time so the
+        # canonical source of truth lives here in the bundle.
+        env:
+          - name: DEVMIRROR_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: DEVMIRROR_CONTROL_CATALOG
+            value: ${var.control_catalog}
+          - name: DEVMIRROR_CONTROL_SCHEMA
+            value: ${var.control_schema}
+          - name: DEVMIRROR_ADMIN_GROUP
+            value: ${var.admin_group}

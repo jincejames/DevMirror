@@ -106,6 +106,134 @@ databricks bundle validate
 databricks bundle deploy --target dev
 ```
 
+## Deploying to a new environment
+
+Both the Databricks App (FastAPI + React UI) and the nightly lifecycle job
+are managed by a single Databricks Asset Bundle (`databricks.yml`).  All
+deploys go through `databricks bundle deploy`.
+
+### One-time prerequisites per workspace
+
+- A Databricks CLI profile authenticated to the target workspace
+  (`databricks auth login --host <url> --profile <name>`).
+- An **account group** the app uses for admin role -- defaults to
+  `devmirror-admins`.  Members see the purple "Admin" badge.
+- A running SQL warehouse (the deploy script auto-picks one, or pass
+  `--warehouse-id`).
+- For the prod DAB target, a dedicated service principal whose
+  `application_id` is passed as `--run-as-sp <id>`.
+
+### One-time bootstrap (first deploy to a workspace)
+
+Run `scripts/bootstrap_env.sh` once.  It creates the Databricks App, waits
+for compute, and grants the auto-created service principal `USE_CATALOG` +
+`ALL_PRIVILEGES` on the control schema.  Pass `--smtp-password-secret` and
+`--teams-webhook-secret` to also pre-create Secret app resources for the
+Stage 5 notification backends.
+
+```bash
+./scripts/bootstrap_env.sh \
+  --profile <profile> \
+  --catalog dev_analytics \
+  --schema devmirror_admin \
+  --smtp-password-secret smtp-pw=devmirror/smtp-password \
+  --teams-webhook-secret teams=devmirror/teams-webhook-url
+```
+
+### Adopting an app that already exists (one-time)
+
+If the workspace already has a `devmirror` app (e.g. from a previous
+deploy, or an app created manually via `databricks apps create`), bind it
+to the bundle once so `databricks bundle deploy` updates it instead of
+trying to create a duplicate:
+
+```bash
+databricks bundle deployment bind devmirror devmirror --auto-approve \
+  --target dev --profile <profile> \
+  --var warehouse_id=<id> --var node_type_id=i3.xlarge \
+  --var control_catalog=dev_analytics --var control_schema=<sch>
+```
+
+The first `devmirror` is the bundle resource key; the second is the
+existing app's name in the workspace.  After binding, normal
+`./scripts/deploy.sh` runs work as expected.
+
+### Routine deploys
+
+```bash
+# Dev (default target): auto-picks a warehouse, derives schema from your email.
+./scripts/deploy.sh --profile <dev-profile>
+
+# Prod: pin the SP that the lifecycle job runs as.
+./scripts/deploy.sh \
+  --profile <prod-profile> \
+  --target prod \
+  --warehouse-id <sql-warehouse-id> \
+  --catalog dev_analytics \
+  --schema devmirror_admin \
+  --run-as-sp <prod-service-principal-application-id>
+```
+
+`scripts/deploy.sh` is a thin convenience wrapper.  It does:
+
+1. `scripts/build_app.sh` -- builds the React frontend and stages the
+   `devmirror` engine package into `app/devmirror/` so the bundle can
+   upload one self-contained source tree.
+2. `databricks bundle deploy` -- uploads source + registers the App
+   resource and the lifecycle job.
+3. `databricks bundle run devmirror` -- triggers an `apps deploy` to
+   start serving the new source.
+
+Equivalent manual flow:
+
+```bash
+./scripts/build_app.sh
+databricks bundle deploy --target dev --profile <name> \
+  --var warehouse_id=<id> --var node_type_id=i3.xlarge \
+  --var control_catalog=dev_analytics --var control_schema=<sch> \
+  --var admin_group=devmirror-admins
+databricks bundle run devmirror --target dev --profile <name>
+```
+
+### SMTP / Teams notifications (Stage 5)
+
+Notification delivery is optional.  After running `bootstrap_env.sh` with
+`--smtp-password-secret` / `--teams-webhook-secret`, extend
+`databricks.yml` under `resources.apps.devmirror.config.env` to reference
+those resource keys via `valueFrom`, plus any plain values you need:
+
+```yaml
+resources:
+  apps:
+    devmirror:
+      config:
+        env:
+          # ... existing 4 core vars ...
+          - name: DEVMIRROR_SMTP_HOST
+            value: smtp.example.com
+          - name: DEVMIRROR_SMTP_FROM
+            value: devmirror@example.com
+          - name: DEVMIRROR_SMTP_USERNAME
+            value: devmirror
+          - name: DEVMIRROR_SMTP_PASSWORD
+            valueFrom: smtp-pw
+          - name: DEVMIRROR_TEAMS_WEBHOOK_URL
+            valueFrom: teams
+```
+
+This is intentionally a YAML edit (not a CLI flag) so the deploy state is
+captured in source control.  Promote between dev and prod via target
+overrides.
+
+### Bundle artifacts at a glance
+
+| File | Purpose |
+|---|---|
+| `databricks.yml` | Single source of truth: lifecycle job + Databricks App |
+| `scripts/bootstrap_env.sh` | One-time per-workspace setup (apps create, grants, secret resources) |
+| `scripts/build_app.sh` | Pre-deploy: frontend build + devmirror staging |
+| `scripts/deploy.sh` | Convenience wrapper: build + bundle deploy + bundle run |
+
 ## Security Model
 
 1. **Principle of Least Privilege**: Developers only get access to objects within their DR scope.

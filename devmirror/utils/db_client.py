@@ -17,6 +17,17 @@ from databricks.sdk import WorkspaceClient
 logger = logging.getLogger(__name__)
 
 
+def _securable_str(securable_type: Any) -> str:
+    """Coerce a SecurableType enum (or str) into the value the SDK URL builder
+    expects.  ``str(SecurableType.SCHEMA)`` returns ``'SecurableType.SCHEMA'``
+    which the server rejects as ``SECURABLETYPE.SCHEMA``; ``.value`` gives
+    the correct ``'SCHEMA'``.
+    """
+    if hasattr(securable_type, "value"):
+        return str(securable_type.value)
+    return str(securable_type)
+
+
 class DbClient:
     """Unified Databricks client using SDK APIs + spark.sql() fallback."""
 
@@ -62,7 +73,7 @@ class DbClient:
         from databricks.sdk.service.catalog import PermissionsChange
 
         self._client.grants.update(
-            securable_type=securable_type,
+            securable_type=_securable_str(securable_type),
             full_name=full_name,
             changes=[PermissionsChange(add=privileges, principal=principal)],
         )
@@ -78,7 +89,7 @@ class DbClient:
         from databricks.sdk.service.catalog import PermissionsChange
 
         self._client.grants.update(
-            securable_type=securable_type,
+            securable_type=_securable_str(securable_type),
             full_name=full_name,
             changes=[PermissionsChange(remove=privileges, principal=principal)],
         )
@@ -207,15 +218,46 @@ class DbClient:
         return []
 
     def _get_spark(self) -> Any:
-        """Get SparkSession only if running on Databricks runtime."""
-        if not os.environ.get("DATABRICKS_RUNTIME_VERSION"):
-            return None
+        """Return an active SparkSession if one is reachable, else None.
+
+        Works in three runtimes:
+          - Classic Databricks clusters (DATABRICKS_RUNTIME_VERSION is set)
+          - Serverless job tasks (no DATABRICKS_RUNTIME_VERSION; Spark is
+            already bootstrapped by the runtime, so getActiveSession()
+            returns the platform's session)
+          - Off-Databricks (laptops, CI) -- returns None so callers fall
+            back to the Statement Execution API instead of accidentally
+            spinning up a local Spark.
+
+        The previous implementation gated on DATABRICKS_RUNTIME_VERSION,
+        which is unset on serverless and forced every query through the
+        warehouse API -- requiring a CAN_USE grant on the warehouse the
+        runtime SP usually doesn't have.
+        """
         try:
             from pyspark.sql import SparkSession
-
-            return SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
         except ImportError:
             return None
+
+        active = SparkSession.getActiveSession()
+        if active is not None:
+            return active
+
+        # No active session.  Only call getOrCreate() when a Databricks-y
+        # env var indicates we're inside a managed runtime; otherwise
+        # we'd start a local Spark on a developer laptop.
+        databricks_signals = (
+            "DATABRICKS_RUNTIME_VERSION",      # classic cluster
+            "DATABRICKS_SERVERLESS_VERSION",   # serverless compute
+            "DB_HOME",                          # both, set by the runtime
+            "DATABRICKS_HOST",                  # apps + jobs auto-injected
+        )
+        if any(os.environ.get(k) for k in databricks_signals):
+            try:
+                return SparkSession.builder.getOrCreate()
+            except Exception:
+                return None
+        return None
 
     def _execute_via_api(self, statement: str) -> list[dict[str, Any]]:
         """Fallback: use statement execution API (requires warehouse_id)."""

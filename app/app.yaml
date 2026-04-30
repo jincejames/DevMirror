@@ -1,13 +1,25 @@
+# Databricks Apps runtime config.
+#
+# IMPORTANT: Databricks Apps treats the env block in this file as the
+# runtime config -- the bundle's `resources.apps.<name>.config.env`
+# does NOT propagate to the running app at deploy time, the platform
+# reads app.yaml from the deployed source instead.
+#
+# For multi-customer deploys, this file must be per-target (the values
+# below are LH-specific).  Engineers deploying to the AWS dev/prod
+# targets need to swap these values before `bundle run`.  A future
+# build_app.sh enhancement (`build_app.sh --target lh`) should write
+# this block from the active bundle target's variables.
 command:
   - sh
   - -c
   - uvicorn backend.main:app --host=0.0.0.0 --port=${DATABRICKS_APP_PORT:-8000}
 env:
   - name: DEVMIRROR_WAREHOUSE_ID
-    value: e9b34f7a2e4b0561
+    value: bda66ae121230af9
   - name: DEVMIRROR_CONTROL_CATALOG
-    value: users
+    value: odp_adw_support_n
   - name: DEVMIRROR_CONTROL_SCHEMA
-    value: jince_james
+    value: devmirror
   - name: DEVMIRROR_ADMIN_GROUP
-    value: devmirror-admins
+    value: lhg-odp-adw-support-admin

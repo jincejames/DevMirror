@@ -12,8 +12,34 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _apply_overrides_from_argv() -> None:
+    """Translate task-level named_parameters into DEVMIRROR_* env vars so
+    load_settings() picks them up.  Used by serverless job tasks where the
+    bundle cannot inject env vars via the environment spec
+    (compute.Environment only allows client + dependencies).
+    parse_known_args() is permissive, so existing CLI calls without these
+    flags are unaffected.
+    """
+    import argparse
+    import os
+
+    p = argparse.ArgumentParser(allow_abbrev=False, add_help=False)
+    p.add_argument("--catalog")
+    p.add_argument("--schema")
+    p.add_argument("--warehouse-id", "--warehouse_id", dest="warehouse_id")
+    args, _ = p.parse_known_args()
+    if args.catalog:
+        os.environ["DEVMIRROR_CONTROL_CATALOG"] = args.catalog
+    if args.schema:
+        os.environ["DEVMIRROR_CONTROL_SCHEMA"] = args.schema
+    if args.warehouse_id:
+        os.environ["DEVMIRROR_WAREHOUSE_ID"] = args.warehouse_id
+
+
 def _build_context() -> tuple:
     """Build shared context: (db_client, settings, dr_repo, obj_repo, access_repo, audit_repo)."""
+    _apply_overrides_from_argv()
+
     from databricks.sdk import WorkspaceClient
 
     from devmirror.control.audit import AuditRepository

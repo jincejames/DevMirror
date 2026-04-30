@@ -44,11 +44,14 @@ _DR_ALLOWED = [
     (DRStatus.EXPIRING_SOON, DRStatus.EXPIRED),
     (DRStatus.EXPIRED, DRStatus.CLEANUP_IN_PROGRESS),
     (DRStatus.CLEANUP_IN_PROGRESS, DRStatus.CLEANED_UP),
+    # FAILED is recoverable: re-provision and refresh can lift it back.
+    (DRStatus.FAILED, DRStatus.PROVISIONING),
+    (DRStatus.FAILED, DRStatus.ACTIVE),
+    (DRStatus.FAILED, DRStatus.CLEANUP_IN_PROGRESS),
 ]
 
 _DR_DISALLOWED = [
     (DRStatus.CLEANED_UP, DRStatus.ACTIVE),
-    (DRStatus.FAILED, DRStatus.ACTIVE),
     (DRStatus.ACTIVE, DRStatus.PENDING_REVIEW),
     (DRStatus.EXPIRED, DRStatus.ACTIVE),
 ]
@@ -154,6 +157,29 @@ class TestDRRepository:
             repo.update_status(db, dr_id="DR-1", current_status=DRStatus.CLEANED_UP,
                                new_status=DRStatus.ACTIVE, last_modified_at="now")
         db.sql_exec_with_params.assert_not_called()
+
+    def test_force_status_unconditional(self) -> None:
+        repo, db = DRRepository(FQN), _mock_db()
+        repo.force_status(db, dr_id="DR-1", new_status=DRStatus.ACTIVE,
+                          last_modified_at="now")
+        called_sql, params = db.sql_exec_with_params.call_args[0]
+        # No CAS gate -- status should not appear in WHERE clause
+        assert "status = :current_status" not in called_sql
+        assert "WHERE dr_id = :dr_id" in called_sql
+        assert params == {
+            "dr_id": "DR-1",
+            "new_status": "ACTIVE",
+            "last_modified_at": "now",
+        }
+
+    def test_force_status_skips_transition_validation(self) -> None:
+        # CLEANED_UP -> ACTIVE is rejected by update_status, but force_status
+        # exists precisely so the runner can recover from a stuck row even
+        # if the transition would have been invalid by the state machine.
+        repo, db = DRRepository(FQN), _mock_db()
+        repo.force_status(db, dr_id="DR-1", new_status=DRStatus.ACTIVE,
+                          last_modified_at="now")
+        db.sql_exec_with_params.assert_called_once()
 
     def test_get_found_and_missing(self) -> None:
         repo, db = DRRepository(FQN), _mock_db()

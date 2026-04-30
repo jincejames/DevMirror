@@ -14,7 +14,9 @@ with one row per prefix; the migration DDL lives at
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -26,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_DR_ID_PATTERN = re.compile(r"^DR-[0-9]+$")
 
-MAX_COUNTER_RETRIES = 3
+# Bumped to handle reasonable concurrent-user bursts (low double-digit).
+# Each retry costs ~one short Delta UPDATE round-trip, so a generous budget
+# is cheap.  Combined with the small randomised backoff applied between
+# retries, this safely absorbs ~10-way contention.
+MAX_COUNTER_RETRIES = 12
 
 
 def format_dr_id(prefix: str, counter: int, padding: int) -> str:
@@ -174,6 +180,10 @@ class IdCounterRepository:
                 prefix,
                 current,
             )
+            # Randomised backoff to spread out contending workers.  The
+            # base grows linearly with the attempt count and the jitter
+            # is uniform so the herd doesn't re-converge on each retry.
+            time.sleep(0.05 * (attempt + 1) + random.uniform(0, 0.05))
         raise RuntimeError(
             f"Could not acquire next DR ID after {MAX_COUNTER_RETRIES} retries"
         )

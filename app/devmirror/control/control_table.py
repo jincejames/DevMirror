@@ -112,7 +112,11 @@ _DR_TRANSITIONS: dict[DRStatus, frozenset[DRStatus]] = {
         {DRStatus.CLEANED_UP, DRStatus.CLEANUP_IN_PROGRESS}
     ),
     DRStatus.CLEANED_UP: frozenset(),
-    DRStatus.FAILED: frozenset(),
+    # FAILED is recoverable: re-provision and refresh can move it back
+    # into the active lifecycle.  Cleanup can also still drop a failed DR.
+    DRStatus.FAILED: frozenset(
+        {DRStatus.PROVISIONING, DRStatus.ACTIVE, DRStatus.CLEANUP_IN_PROGRESS}
+    ),
 }
 
 _OBJECT_TRANSITIONS: dict[ObjectStatus, frozenset[ObjectStatus]] = {
@@ -218,6 +222,35 @@ class DRRepository:
             "dr_id": dr_id,
             "new_status": new_status.value,
             "current_status": current_status.value,
+            "last_modified_at": last_modified_at,
+        }
+        db_client.sql_exec_with_params(sql, params)
+        return sql
+
+    def force_status(
+        self,
+        db_client: Any,
+        *,
+        dr_id: str,
+        new_status: DRStatus,
+        last_modified_at: str,
+    ) -> str:
+        """Set DR status unconditionally, skipping the CAS gate that
+        update_status uses.  Use only from inside provision_dr / cleanup_dr
+        where TaskTracker single-flighting makes the runner the
+        authoritative writer for the row.  The CAS in update_status would
+        otherwise silently no-op (the Statement Execution API doesn't
+        return affected-row counts) and leave the row at a stale status.
+        """
+        sql = (
+            f"UPDATE {self._table} SET "
+            "status = :new_status, "
+            "last_modified_at = :last_modified_at "
+            "WHERE dr_id = :dr_id"
+        )
+        params: dict[str, str | None] = {
+            "dr_id": dr_id,
+            "new_status": new_status.value,
             "last_modified_at": last_modified_at,
         }
         db_client.sql_exec_with_params(sql, params)

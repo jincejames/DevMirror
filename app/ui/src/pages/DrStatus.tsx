@@ -277,15 +277,93 @@ export default function DrStatus() {
         <div className="detail-section">
           <h2>Recent Audit Log</h2>
           <ul className="audit-log">
-            {data.recent_audit.map((entry, i) => (
-              <li key={i}>
-                <span className="audit-timestamp">
-                  {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '-'}
-                </span>
-                <span className="audit-action">{entry.action}</span>
-                {entry.details && <span>{entry.details}</span>}
-              </li>
-            ))}
+            {data.recent_audit.map((entry, i) => {
+              const ts = entry.performed_at as string | undefined;
+              const action = entry.action as string;
+              const status = entry.status as string | undefined;
+              const detailRaw = entry.action_detail as string | undefined;
+              const errorRaw = entry.error_message as string | undefined;
+              const detailParsed = parseJson(detailRaw);
+              const detail = (detailParsed && typeof detailParsed === 'object')
+                ? detailParsed as Record<string, unknown>
+                : null;
+              const objectFailures = (detail && Array.isArray(detail.failures))
+                ? detail.failures as Array<{source_fqn: string; target_fqn: string; error: string}>
+                : [];
+              const grantFailures = (detail && Array.isArray(detail.grant_failures))
+                ? detail.grant_failures as Array<{statement: string; error: string}>
+                : [];
+              const schemaFailures = (detail && Array.isArray(detail.schema_failures))
+                ? detail.schema_failures as Array<{schema_fqn: string; error: string}>
+                : [];
+              const totalFailures = objectFailures.length + grantFailures.length + schemaFailures.length;
+              const isFailure = status === 'FAILED' || status === 'PARTIAL_SUCCESS';
+              return (
+                <li key={i}>
+                  <span className="audit-timestamp">
+                    {ts ? new Date(ts).toLocaleString() : '-'}
+                  </span>
+                  <span className="audit-action">{action}</span>
+                  {status && <span className={`badge badge-${status.toLowerCase()}`}>{status}</span>}
+                  {detail && (
+                    <span style={{fontSize: '0.85em', color: '#555'}}>
+                      {summarizeDetail(detail as Record<string, unknown>)}
+                    </span>
+                  )}
+                  {isFailure && totalFailures > 0 && (
+                    <details style={{marginTop: '0.25rem'}} open>
+                      <summary style={{cursor: 'pointer', color: '#b00020'}}>
+                        {totalFailures} failure{totalFailures === 1 ? '' : 's'} - click to collapse
+                      </summary>
+                      {schemaFailures.length > 0 && (
+                        <div style={{margin: '0.5rem 0 0 1rem'}}>
+                          <strong style={{fontSize: '0.85em'}}>Schema failures</strong>
+                          <ul style={{margin: '0.25rem 0 0 0'}}>
+                            {schemaFailures.map((f, j) => (
+                              <li key={j} style={{fontSize: '0.8em', marginBottom: '0.25rem'}}>
+                                <code>{f.schema_fqn}</code>
+                                <div style={{color: '#b00020', whiteSpace: 'pre-wrap'}}>{f.error}</div>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {objectFailures.length > 0 && (
+                        <div style={{margin: '0.5rem 0 0 1rem'}}>
+                          <strong style={{fontSize: '0.85em'}}>Object clone failures</strong>
+                          <ul style={{margin: '0.25rem 0 0 0'}}>
+                            {objectFailures.map((f, j) => (
+                              <li key={j} style={{fontSize: '0.8em', marginBottom: '0.25rem'}}>
+                                <code>{f.source_fqn}</code>
+                                <div style={{color: '#b00020', whiteSpace: 'pre-wrap'}}>{f.error}</div>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {grantFailures.length > 0 && (
+                        <div style={{margin: '0.5rem 0 0 1rem'}}>
+                          <strong style={{fontSize: '0.85em'}}>Grant failures</strong>
+                          <ul style={{margin: '0.25rem 0 0 0'}}>
+                            {grantFailures.map((f, j) => (
+                              <li key={j} style={{fontSize: '0.8em', marginBottom: '0.25rem'}}>
+                                <code style={{whiteSpace: 'pre-wrap'}}>{f.statement}</code>
+                                <div style={{color: '#b00020', whiteSpace: 'pre-wrap'}}>{f.error}</div>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </details>
+                  )}
+                  {isFailure && totalFailures === 0 && errorRaw && (
+                    <pre style={{fontSize: '0.8em', color: '#b00020', whiteSpace: 'pre-wrap', margin: '0.25rem 0 0 0'}}>
+                      {errorRaw}
+                    </pre>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -477,4 +555,43 @@ export default function DrStatus() {
       )}
     </div>
   );
+}
+
+function parseJson(raw: string | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function summarizeDetail(detail: Record<string, unknown>): string {
+  // Compact, human-readable summary for the audit row body.
+  const bits: string[] = [];
+  if (typeof detail.objects_succeeded === 'number') {
+    bits.push(`${detail.objects_succeeded} succeeded`);
+  }
+  if (typeof detail.objects_failed === 'number' && detail.objects_failed > 0) {
+    bits.push(`${detail.objects_failed} clones failed`);
+  }
+  if (typeof detail.schemas_created === 'number') {
+    bits.push(`${detail.schemas_created} schemas`);
+  }
+  if (typeof detail.schemas_failed === 'number' && detail.schemas_failed > 0) {
+    bits.push(`${detail.schemas_failed} schemas failed`);
+  }
+  if (typeof detail.grants_applied === 'number' && detail.grants_applied > 0) {
+    bits.push(`${detail.grants_applied} grants`);
+  }
+  if (typeof detail.grants_failed === 'number' && detail.grants_failed > 0) {
+    bits.push(`${detail.grants_failed} grants failed`);
+  }
+  if (typeof detail.mode === 'string') {
+    bits.push(`mode=${detail.mode}`);
+  }
+  if (typeof detail.message === 'string') {
+    bits.push(detail.message);
+  }
+  return bits.join(' / ');
 }

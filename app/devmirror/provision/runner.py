@@ -173,7 +173,12 @@ def provision_dr(
                     f"(or --auto-approve) to proceed."
                 )
 
-    # Insert DR record
+    # Insert DR record (or, if it already exists, normalise its status to
+    # PROVISIONING so the post-work CAS update can find it).  Without this,
+    # a re-provision of a previously FAILED DR would silently no-op its
+    # final status update -- the row would stay at FAILED even after every
+    # object successfully cloned.
+    inserted = False
     try:
         dr_repo.insert(
             db_client,
@@ -186,8 +191,31 @@ def provision_dr(
             expiration_date=dr.lifecycle.expiration_date.isoformat(),
             last_modified_at=now,
         )
+        inserted = True
     except Exception:
         logger.debug("DR insert may have failed (possibly already exists), continuing")
+
+    if not inserted and existing_dr is not None:
+        # Row exists -- normalise to PROVISIONING before any work runs.  We
+        # use force_status (no CAS gate) because the previous CAS-based
+        # approach silently no-op'd whenever the live row's status didn't
+        # match the value cached in existing_dr (e.g. a row stuck at FAILED
+        # from a prior crashed run).  The runner is the authoritative
+        # writer for this DR thanks to TaskTracker single-flighting, so
+        # losing the CAS check is safe.
+        try:
+            dr_repo.force_status(
+                db_client,
+                dr_id=dr_id,
+                new_status=DRStatus.PROVISIONING,
+                last_modified_at=now,
+            )
+        except Exception as exc:
+            logger.error(
+                "Pre-provision force_status to PROVISIONING failed for %s: %s",
+                dr_id, exc,
+            )
+            raise
 
     # Audit start
     audit_repo.append(
@@ -306,19 +334,23 @@ def provision_dr(
             except Exception:
                 logger.debug("Status update to FAILED failed, non-fatal")
 
-    # Grant access
+    # Grant access -- skip if no schemas were created for this environment
+    # (otherwise apply_grants would still validate principals and produce
+    # spurious "principal not found" entries).
     dev_schemas = _get_schemas_for_env(config, manifest, "dev")
-    dev_principals = list(dr.access.developers)
-    grant_result = apply_grants(db_client, dev_schemas, dev_principals)
-    result.grants_applied += grant_result.granted
-    result.grants_failed.extend(grant_result.failed)
+    if dev_schemas:
+        dev_principals = list(dr.access.developers)
+        grant_result = apply_grants(db_client, dev_schemas, dev_principals)
+        result.grants_applied += grant_result.granted
+        result.grants_failed.extend(grant_result.failed)
 
     if "qa" in envs and dr.access.qa_users:
         qa_schemas = _get_schemas_for_env(config, manifest, "qa")
-        qa_principals = list(dr.access.qa_users)
-        qa_grant_result = apply_grants(db_client, qa_schemas, qa_principals)
-        result.grants_applied += qa_grant_result.granted
-        result.grants_failed.extend(qa_grant_result.failed)
+        if qa_schemas:
+            qa_principals = list(dr.access.qa_users)
+            qa_grant_result = apply_grants(db_client, qa_schemas, qa_principals)
+            result.grants_applied += qa_grant_result.granted
+            result.grants_failed.extend(qa_grant_result.failed)
 
     # Record access rows
     access_rows: list[dict[str, str]] = []
@@ -351,36 +383,99 @@ def provision_dr(
     except Exception:
         logger.debug("Access row insert may have partially failed, non-fatal")
 
-    # Determine final status
-    if result.all_objects_failed:
+    # Collect per-phase failure details so admins can debug without trawling
+    # worker logs.  Each list is capped per-row to keep audit cells bounded.
+    object_failure_details: list[dict[str, str]] = [
+        {
+            "source_fqn": r.source_fqn,
+            "target_fqn": r.target_fqn,
+            "error": (r.error or "unknown error")[:1000],
+        }
+        for r in result.objects_failed
+    ]
+    grant_failure_details: list[dict[str, str]] = [
+        {"statement": stmt[:500], "error": err[:1000]}
+        for stmt, err in result.grants_failed
+    ]
+    schema_failure_details: list[dict[str, str]] = [
+        {"schema_fqn": fqn, "error": (err or "unknown error")[:1000]}
+        for fqn, err in result.schemas_failed.items()
+    ]
+
+    # Determine final status.  Grants and schemas count too: a DR whose
+    # objects cloned fine but whose grants all failed is not usable, so we
+    # surface that as PARTIAL_SUCCESS (or FAILED if literally nothing
+    # worked).
+    grants_attempted = result.grants_applied + len(result.grants_failed)
+    all_grants_failed = grants_attempted > 0 and result.grants_applied == 0
+    nothing_succeeded = (
+        not result.objects_succeeded
+        and not result.schemas_created
+        and result.grants_applied == 0
+    )
+    any_failure = bool(
+        result.objects_failed
+        or result.grants_failed
+        or result.schemas_failed
+    )
+
+    if (result.all_objects_failed and all_grants_failed) or (
+        nothing_succeeded and any_failure
+    ):
         final_status = DRStatus.FAILED
         audit_status = "FAILED"
-    elif result.is_partial_success:
+    elif any_failure:
         final_status = DRStatus.ACTIVE
         audit_status = "PARTIAL_SUCCESS"
     else:
         final_status = DRStatus.ACTIVE
         audit_status = "SUCCESS"
 
-    # Update DR status
+    # Update DR status -- unconditional (no CAS gate).  See pre-provision
+    # comment above for the rationale; same defect would otherwise sink
+    # this update silently if the row is at a status other than
+    # PROVISIONING for any reason.
     try:
-        dr_repo.update_status(
+        dr_repo.force_status(
             db_client,
             dr_id=dr_id,
-            current_status=DRStatus.PROVISIONING,
             new_status=final_status,
             last_modified_at=now_iso(),
         )
     except Exception:
-        logger.debug("DR status update failed, non-fatal")
+        logger.error(
+            "Final force_status update failed for %s", dr_id, exc_info=True,
+        )
+        raise
+
+    # Read-back verification.  The Statement Execution API doesn't return
+    # affected-row counts, so the only way to detect a bad write is to
+    # re-read.  Mismatch is logged at CRITICAL because the audit row that
+    # was just appended now disagrees with the live row.
+    try:
+        verify_row = dr_repo.get(db_client, dr_id=dr_id)
+        live_status = verify_row.get("status") if verify_row else None
+        if live_status != final_status.value:
+            logger.critical(
+                "Status read-back mismatch for %s: wrote %s, row reads %s",
+                dr_id, final_status.value, live_status or "<missing>",
+            )
+    except Exception:
+        logger.warning("Status read-back query failed for %s", dr_id, exc_info=True)
 
     result.final_status = final_status.value
 
-    # Audit completion
-    error_msg = None
-    if result.objects_failed:
-        failed_sources = [r.source_fqn for r in result.objects_failed]
-        error_msg = json.dumps({"failed_objects": failed_sources})
+    # error_message column: JSON-encoded summary of every failure phase.
+    # action_detail mirrors the same data so the DR Status page (which
+    # surfaces action_detail) can render it without an extra column join.
+    error_payload: dict[str, list[dict[str, str]]] = {}
+    if object_failure_details:
+        error_payload["failed_objects"] = object_failure_details
+    if grant_failure_details:
+        error_payload["failed_grants"] = grant_failure_details
+    if schema_failure_details:
+        error_payload["failed_schemas"] = schema_failure_details
+    error_msg = json.dumps(error_payload) if error_payload else None
 
     audit_repo.append(
         db_client,
@@ -394,7 +489,12 @@ def provision_dr(
             "objects_succeeded": len(result.objects_succeeded),
             "objects_failed": len(result.objects_failed),
             "schemas_created": len(result.schemas_created),
+            "schemas_failed": len(result.schemas_failed),
             "grants_applied": result.grants_applied,
+            "grants_failed": len(result.grants_failed),
+            "failures": object_failure_details,
+            "grant_failures": grant_failure_details,
+            "schema_failures": schema_failure_details,
         }),
         error_message=error_msg,
     )

@@ -29,10 +29,17 @@ class TestExtractDrNumber:
     @pytest.mark.parametrize(
         ("dr_id", "expected"),
         [
+            # Legacy hyphen-separated form
             ("DR-0", "0"),
             ("DR-1", "1"),
             ("DR-1042", "1042"),
             ("DR-999999", "999999"),
+            # Stage 4 auto-generated form (no hyphen, zero-padded counter)
+            ("DR00001", "00001"),
+            ("DR12345", "12345"),
+            ("DR000000001", "000000001"),
+            ("PROJ00042", "00042"),       # custom prefix
+            ("ABC100", "100"),             # 3-digit counter is the minimum
         ],
     )
     def test_valid(self, dr_id: str, expected: str) -> None:
@@ -40,10 +47,19 @@ class TestExtractDrNumber:
 
     @pytest.mark.parametrize(
         "bad_id",
-        ["DR-", "dr-100", "DR100", "WR-100", "DR-abc", "", "DR-12-34"],
+        [
+            "DR-",          # legacy form needs digits after the hyphen
+            "DR-abc",       # legacy form requires digits
+            "DR-12-34",     # double hyphen not in either form
+            "WR-100",       # legacy form requires literal 'DR-' prefix
+            "DR1",          # new form requires at least 3 digits
+            "DR12",         # new form requires at least 3 digits
+            "1DR123",       # new form prefix must start with a letter
+            "",             # empty string
+        ],
     )
     def test_invalid(self, bad_id: str) -> None:
-        with pytest.raises(NamingError, match="Invalid dr_id format"):
+        with pytest.raises(NamingError, match="matches neither"):
             extract_dr_number(bad_id)
 
 

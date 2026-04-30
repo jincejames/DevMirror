@@ -182,6 +182,49 @@ class TestProvisionDr:
         assert result.final_status == "ACTIVE"
         assert len(result.objects_succeeded) == 0
 
+    def test_failed_dr_recovers_to_active(self) -> None:
+        # Re-provisioning a DR currently stuck at FAILED must land at ACTIVE
+        # via force_status (no CAS) -- guards against the silent-no-op
+        # regression where the row stayed at FAILED forever.
+        dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        # Existing FAILED row -- insert raises so the runner takes the
+        # "row exists, force into PROVISIONING" branch.
+        dr.get.return_value = {"dr_id": "DR-1042", "status": "ACTIVE"}  # post-run read-back returns the new value
+        dr.insert.side_effect = Exception("row exists")
+        # The very first dr.get (existing_dr fetch) should see FAILED; the
+        # read-back at the end should see ACTIVE.  Use side_effect for that.
+        dr.get.side_effect = [
+            {"dr_id": "DR-1042", "status": "FAILED"},
+            {"dr_id": "DR-1042", "status": "ACTIVE"},
+        ]
+        result = provision_dr(_cfg(), _manifest(),
+                              db_client=_mock_db(), dr_repo=dr, obj_repo=obj,
+                              access_repo=acc, audit_repo=aud, force_replace=True)
+        assert result.final_status == "ACTIVE"
+        statuses = [c.kwargs["new_status"].value for c in dr.force_status.call_args_list]
+        assert "PROVISIONING" in statuses
+        assert statuses[-1] == "ACTIVE"
+        # update_status (CAS-gated) must NOT be called from inside the
+        # runner -- that's the whole point of switching to force_status.
+        dr.update_status.assert_not_called()
+
+    def test_readback_mismatch_logs_critical(self, caplog) -> None:
+        # Simulate the case where force_status "succeeds" (no exception) but
+        # the row stayed at the wrong value (the historical silent-no-op).
+        # The read-back should log CRITICAL.
+        import logging
+        dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        # First dr.get is existing_dr lookup (None means "new row"); second
+        # is the read-back, which returns FAILED instead of the expected
+        # ACTIVE -> CRITICAL.
+        dr.get.side_effect = [None, {"dr_id": "DR-1042", "status": "FAILED"}]
+        with caplog.at_level(logging.CRITICAL, logger="devmirror.provision.runner"):
+            provision_dr(_cfg(), _manifest(),
+                         db_client=_mock_db(), dr_repo=dr, obj_repo=obj,
+                         access_repo=acc, audit_repo=aud, force_replace=True)
+        critical_msgs = [r.message for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert any("read-back mismatch" in m for m in critical_msgs)
+
 
 # ------------------------------------------------------------------
 # ProvisionResult

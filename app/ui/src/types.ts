@@ -144,9 +144,17 @@ export interface DrObject {
 }
 
 export interface AuditEntry {
+  // Real audit-log column names (devmirror_audit_log table).
+  log_id?: string;
+  dr_id?: string;
   action: string;
-  timestamp: string;
-  details?: string;
+  performed_at?: string;
+  performed_by?: string;
+  status?: string;
+  // action_detail is a JSON string the frontend parses on demand.
+  action_detail?: string;
+  error_message?: string;
+  // Catch-all so legacy / partial rows don't blow the type check.
   [key: string]: unknown;
 }
 

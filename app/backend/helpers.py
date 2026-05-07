@@ -34,15 +34,35 @@ _table_ensured = False
 
 
 def _get_repo(settings: Settings, db_client: DbClient | None = None) -> ConfigRepository:
-    """Return a ConfigRepository, bootstrapping the table on first call."""
+    """Return a ConfigRepository, bootstrapping ALL control tables on
+    first call.
+
+    Previously this only ensured `devmirror_configs`; the rest of the
+    control plane (devmirror_development_requests, devmirror_dr_objects,
+    devmirror_dr_access, audit_log, devmirror_id_counter) was assumed
+    to be created out-of-band via `apply_control_ddl()`.  In customer
+    onboardings where that step is skipped (e.g. LH), the first
+    provision call blows up with TABLE_OR_VIEW_NOT_FOUND on whichever
+    table happens to be queried first.  Running the full DDL idempotently
+    (CREATE TABLE IF NOT EXISTS) on first request is cheap and removes
+    the foot-gun.
+    """
     global _table_ensured  # noqa: PLW0603
     repo = ConfigRepository(settings.control_fqn_prefix)
     if not _table_ensured and db_client is not None:
         try:
-            repo.ensure_table(db_client)
-            logger.info("devmirror_configs table ensured at %s", repo.table_fqn)
+            from devmirror.control.control_table import apply_control_ddl
+
+            apply_control_ddl(db_client, settings)
+            logger.info(
+                "Control-plane DDL applied at %s", settings.control_fqn_prefix,
+            )
         except Exception:
-            logger.warning("Could not bootstrap devmirror_configs table", exc_info=True)
+            logger.warning(
+                "Could not bootstrap control-plane DDL at %s",
+                settings.control_fqn_prefix,
+                exc_info=True,
+            )
         _table_ensured = True
     return repo
 
@@ -171,7 +191,7 @@ def _control_repos(settings: Settings):
 def _run_scan(db_client: DbClient, settings: Settings, dm_config, target_catalog: str | None = None) -> dict:
     """Run the full scan pipeline and return the manifest dict."""
     from devmirror.scan.dependency_classifier import classify_dependencies
-    from devmirror.scan.lineage import query_lineage, query_table_sizes
+    from devmirror.scan.lineage import LineageResult, query_lineage, query_table_sizes
     from devmirror.scan.manifest import build_manifest
     from devmirror.scan.stream_resolver import resolve_streams
 
@@ -179,16 +199,24 @@ def _run_scan(db_client: DbClient, settings: Settings, dm_config, target_catalog
 
     ws_client = db_client.client
     stream_names = [s.name for s in dr.streams]
-    resolved, unresolved = resolve_streams(ws_client, stream_names)
-    if unresolved:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unresolved streams: {unresolved}",
-        )
 
-    lineage_result = query_lineage(
-        db_client, resolved, lineage_table=settings.lineage_system_table
-    )
+    # Short-circuit when the DR has no streams -- the additional_objects
+    # path doesn't need workflow resolution or lineage walking, and we
+    # specifically don't want to query `system.access.table_lineage`
+    # (which may not even be reachable in some workspaces).
+    if stream_names:
+        resolved, unresolved = resolve_streams(ws_client, stream_names)
+        if unresolved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unresolved streams: {unresolved}",
+            )
+        lineage_result = query_lineage(
+            db_client, resolved, lineage_table=settings.lineage_system_table,
+        )
+    else:
+        resolved = []
+        lineage_result = LineageResult(edges=[], row_limit_hit=False)
 
     classification = classify_dependencies(
         lineage_result.edges,

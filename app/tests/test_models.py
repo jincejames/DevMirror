@@ -105,10 +105,27 @@ class TestConfigInToDevMirrorConfig:
 class TestConfigInValidation:
     """Tests for ConfigIn's own Pydantic validators."""
 
-    def test_empty_streams_rejected(self):
+    def test_empty_streams_rejected_without_additional_objects(self):
         with pytest.raises(ValidationError) as exc_info:
             _minimal_config_in(streams=[])
-        assert "stream" in str(exc_info.value).lower()
+        # Either "stream" or "additional object" should appear in the
+        # error since both are rejected together.
+        msg = str(exc_info.value).lower()
+        assert "stream" in msg or "additional object" in msg
+
+    def test_empty_streams_allowed_with_additional_objects(self):
+        # No exception -- the pair (streams=[], additional_objects=[...])
+        # is a valid submission.
+        config_in = _minimal_config_in(
+            streams=[], additional_objects=["cat.sch.tbl"],
+        )
+        assert config_in.streams == []
+        assert config_in.additional_objects == ["cat.sch.tbl"]
+
+    def test_both_streams_and_additional_objects_empty_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            _minimal_config_in(streams=[], additional_objects=[])
+        assert "stream" in str(exc_info.value).lower() or "additional object" in str(exc_info.value).lower()
 
     def test_empty_developers_rejected(self):
         with pytest.raises(ValidationError) as exc_info:

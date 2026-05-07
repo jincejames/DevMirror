@@ -160,9 +160,32 @@ class TestDevelopmentRequest:
             with pytest.raises(ValidationError, match="dr_id"):
                 DevelopmentRequest(**_minimal_dr_dict(dr_id=bad_id))
 
-    def test_empty_streams_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="at least 1"):
+    def test_empty_streams_rejected_without_additional_objects(self) -> None:
+        # Empty streams + no additional_objects -> reject (need at least
+        # one source).
+        with pytest.raises(
+            ValidationError, match="At least one stream OR one additional object",
+        ):
             DevelopmentRequest(**_minimal_dr_dict(streams=[]))
+
+    def test_empty_streams_allowed_with_additional_objects(self) -> None:
+        # Empty streams is fine when additional_objects supplies the
+        # source list.  Lineage walking is skipped at runtime in this
+        # mode (see app/backend/helpers._run_scan).
+        dr = DevelopmentRequest(**_minimal_dr_dict(
+            streams=[],
+            additional_objects=["cat.sch.tbl"],
+        ))
+        assert dr.streams == []
+        assert dr.additional_objects == ["cat.sch.tbl"]
+
+    def test_both_empty_rejected(self) -> None:
+        with pytest.raises(
+            ValidationError, match="At least one stream OR one additional object",
+        ):
+            DevelopmentRequest(
+                **_minimal_dr_dict(streams=[], additional_objects=None),
+            )
 
     def test_additional_objects_valid_fqn(self) -> None:
         dr = DevelopmentRequest(**_minimal_dr_dict(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from devmirror.config.schema import (
     Access,
@@ -47,12 +47,17 @@ class ConfigIn(BaseModel):
     notification_days_before: int = 7
     notification_recipients: list[str] | None = None
 
-    @field_validator("streams")
-    @classmethod
-    def _at_least_one_stream(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("At least one stream is required")
-        return v
+    @model_validator(mode="after")
+    def _streams_or_additional_objects(self) -> "ConfigIn":
+        # A DR must scope at least one source: either a stream (job /
+        # pipeline whose lineage we'll walk) or one or more explicit
+        # additional_objects FQNs.  Empty-everything is rejected to
+        # prevent accidental "clone nothing" submissions.
+        if not self.streams and not (self.additional_objects or []):
+            raise ValueError(
+                "At least one stream OR one additional object is required"
+            )
+        return self
 
     @field_validator("developers")
     @classmethod
@@ -156,6 +161,11 @@ class StreamSearchResult(BaseModel):
 
     name: str
     type: str  # "job" or "pipeline"
+    # Friendly label of the workspace where the stream was found
+    # (e.g. "local", "prod").  Set when multi-workspace search is
+    # configured; absent (None) for backward-compatible single-workspace
+    # responses.
+    workspace: str | None = None
 
 
 class StreamSearchResponse(BaseModel):

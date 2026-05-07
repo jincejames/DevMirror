@@ -14,6 +14,15 @@ command:
   - sh
   - -c
   - uvicorn backend.main:app --host=0.0.0.0 --port=${DATABRICKS_APP_PORT:-8000}
+# user_api_scopes turns on the platform's on-behalf-of-user OAuth path:
+# every authenticated request to the app receives the caller's user token
+# in `X-Forwarded-Access-Token`.  We use that token (not the app SP's
+# credentials) for SCIM lookups so the role resolver can read the user's
+# own group memberships -- the app SP itself isn't a workspace admin and
+# would be denied by SCIM Get/list-with-projection on non-self records.
+user_api_scopes:
+  - iam.access-control:read
+  - iam.current-user:read
 env:
   - name: DEVMIRROR_WAREHOUSE_ID
     value: bda66ae121230af9
@@ -23,3 +32,35 @@ env:
     value: devmirror
   - name: DEVMIRROR_ADMIN_GROUP
     value: lhg-odp-adw-support-admin
+  # Static admin-emails list (comma-separated, case-insensitive).  Any
+  # caller whose X-Forwarded-Email matches gets the admin role
+  # immediately, without SCIM.  Used as a workaround when the app SP
+  # cannot read SCIM (non-admin SP + account-level admin group + OBO
+  # disabled).  Members of DEVMIRROR_ADMIN_GROUP still get admin via
+  # the SCIM path when reachable; the two paths layer.
+  - name: DEVMIRROR_ADMIN_EMAILS
+    value: jince.james.sp@dlh.de
+  # System-table override for environments that expose lineage via a
+  # curated view rather than direct `system.access.table_lineage`
+  # access.  LH publishes views in `odp_global.domain_adw` following
+  # the convention `sys_<schema>_<table>`, so the lineage view is
+  # `sys_access_table_lineage`.  Other workspaces (e2-demo etc.) leave
+  # this empty / unset so the engine falls back to the default
+  # `system.access.table_lineage`.
+  - name: DEVMIRROR_LINEAGE_SYSTEM_TABLE
+    value: odp_global.domain_adw.sys_access_table_lineage
+  # ---- Multi-workspace stream search (optional) -------------------------
+  # When DEVMIRROR_REMOTE_WORKSPACE_HOST and _TOKEN are both non-empty,
+  # the /api/streams/search endpoint also queries the named remote
+  # workspace and tags each result with DEVMIRROR_REMOTE_WORKSPACE_LABEL.
+  # The token MUST be supplied via `valueFrom: <secret-resource-key>`
+  # after pre-creating an Apps Secret resource -- see
+  # customers/lh/README.md > "Multi-workspace stream search".
+  - name: DEVMIRROR_LOCAL_WORKSPACE_LABEL
+    value: local
+  - name: DEVMIRROR_REMOTE_WORKSPACE_HOST
+    value: ""
+  - name: DEVMIRROR_REMOTE_WORKSPACE_LABEL
+    value: ""
+  - name: DEVMIRROR_REMOTE_WORKSPACE_TOKEN
+    value: ""

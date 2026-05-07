@@ -63,13 +63,19 @@ def get_user_role(request: Request) -> str:
 
     Resolution steps:
     1. Extract email from ``X-Forwarded-Email`` header (fall back to ``"unknown"``).
-    2. Check the in-memory cache (TTL 5 min).
-    3. Query the Databricks workspace admin group (env ``DEVMIRROR_ADMIN_GROUP``,
-       default ``"devmirror-admins"``) via ``WorkspaceClient().groups.list()``.
-    4. Return ``"admin"`` if the user is a member, otherwise ``"user"``.
-    5. On any failure, default to ``"user"`` (fail-safe / least privilege).
+    2. Extract the user's OAuth token from ``X-Forwarded-Access-Token``.
+       The platform sends this header only when ``user_api_scopes`` is
+       declared in ``app.yaml``.
+    3. Check the in-memory cache (TTL 120 s).
+    4. Query SCIM ``/Me`` *as the user* (not as the app SP) for group
+       memberships -- the app SP itself can't read another user's groups
+       on non-admin workspaces, but every user can read their own /Me.
+    5. Return ``"admin"`` if the configured admin group is among the
+       user's groups, otherwise ``"user"``.
+    6. On any failure, default to ``"user"`` (fail-safe / least privilege).
     """
     email = request.headers.get("X-Forwarded-Email", "unknown")
+    user_token = request.headers.get("X-Forwarded-Access-Token", "") or ""
 
     # Check cache --------------------------------------------------------
     now = time.time()
@@ -80,8 +86,8 @@ def get_user_role(request: Request) -> str:
             if now - ts < _CACHE_TTL_SECONDS:
                 return role
 
-    # Resolve role from Databricks group API ----------------------------
-    role = _resolve_role(email)
+    # Resolve role from Databricks SCIM, using the user's own token -----
+    role = _resolve_role(email, user_token)
 
     with _role_cache_lock:
         _role_cache[email] = (role, time.time())
@@ -89,65 +95,117 @@ def get_user_role(request: Request) -> str:
     return role
 
 
-def _resolve_role(email: str) -> str:
-    """Query Databricks groups API to determine if *email* is an admin.
+def _resolve_role(email: str, user_token: str = "") -> str:
+    """Query Databricks SCIM to determine if *email* is in the admin group.
 
-    Group members are stored as ``{value: <user_id>, display: <display name>}``
-    in SCIM. Neither field is the email, so we first translate the email to
-    a user ID via the SCIM users API, then check that ID against the admin
-    group's members. We also fall back to ``user.userName`` and ``user.emails``
-    in case display naming is non-standard.
+    Implementation note: the workspace's ``GET /scim/v2/Users/{id}`` and
+    ``GET /scim/v2/Groups/{id}`` endpoints are admin-only -- a non-admin
+    service principal hits 403 on both.  ``GET /scim/v2/Users`` (list) is
+    accessible to any authenticated SP and supports SCIM's
+    ``?attributes=`` projection, which lets us pull the user's group
+    memberships inline.  That avoids the admin-only Get endpoints entirely
+    and works for:
+      - workspace-local groups,
+      - account-level groups assigned to the workspace (the workspace
+        ``Groups/{id}.members`` list is empty for those, but ``users``
+        records carry the membership in their ``groups`` attribute).
+
+    SCIM filter injection is gated by ``_EMAIL_PATTERN``: emails that
+    don't match a strict user-email shape skip the SCIM lookup and we
+    return "user" (least privilege) without ever building a tainted
+    filter.
     """
     try:
         from databricks.sdk import WorkspaceClient
 
         admin_group = os.environ.get("DEVMIRROR_ADMIN_GROUP", "devmirror-admins")
-        ws = WorkspaceClient()
-        email_lc = email.lower()
+        admin_group_lc = admin_group.lower()
 
-        # 1. Resolve email -> user ID via SCIM users API.  Guard against
-        # SCIM filter injection: refuse to build the filter at all if the
-        # email contains anything outside the strict pattern.  Any quote,
-        # CRLF, or operator-like substring trips the regex and we fall
-        # through to the display-string fallback paths below.
-        user_id: str | None = None
-        if _EMAIL_PATTERN.match(email):
-            users = list(ws.users.list(filter=f"userName eq '{email}'"))
-            if users:
-                user_id = str(getattr(users[0], "id", "") or "")
-        else:
+        if not _EMAIL_PATTERN.match(email):
             logger.warning(
-                "Refusing SCIM users.list with non-conforming email; "
-                "falling back to display match",
+                "Refusing SCIM lookup with non-conforming email %r; "
+                "defaulting to 'user'",
+                email,
             )
-
-        # 2. Find the admin group, then fetch full detail (list may omit members)
-        groups = list(ws.groups.list(filter=f"displayName eq '{admin_group}'"))
-        if not groups:
-            logger.info("Admin group '%s' not found; defaulting to 'user'", admin_group)
             return "user"
 
-        group_id = getattr(groups[0], "id", None)
-        if not group_id:
-            return "user"
-        group = ws.groups.get(group_id)
-        members = group.members or []
+        # Static admin-emails bypass.  Useful when SCIM-based group
+        # lookup is blocked -- e.g. the app SP is not a workspace admin
+        # AND the admin group is account-level (workspace SCIM strips
+        # `groups` for non-admin callers) AND OBO `user_api_scopes` is
+        # not enabled in the workspace.  When DEVMIRROR_ADMIN_EMAILS is
+        # set (comma-separated), any caller whose email matches (case-
+        # insensitive) is granted admin without touching SCIM.  The
+        # SCIM-based group lookup below still runs for callers NOT in
+        # the static list, so the two paths layer naturally.
+        admin_emails_raw = os.environ.get("DEVMIRROR_ADMIN_EMAILS", "").strip()
+        if admin_emails_raw:
+            allow = {
+                e.strip().lower()
+                for e in admin_emails_raw.split(",")
+                if e.strip()
+            }
+            if email.lower() in allow:
+                return "admin"
 
-        # 3. Match by user ID (primary) or by display fields (fallback)
-        for member in members:
-            member_value = str(getattr(member, "value", "") or "")
-            member_display = str(getattr(member, "display", "") or "").lower()
-            if user_id and member_value == user_id:
-                return "admin"
-            if email_lc == member_display:
-                return "admin"
-            # Some directories store the email in member.value (e.g. SP refs)
-            if email_lc == member_value.lower():
-                return "admin"
+        # Two lookup paths.  Try OBO first (per-request user token) so the
+        # app SP doesn't need workspace-admin privilege; fall back to the
+        # app SP's own credentials.  The fallback only succeeds if the SP
+        # IS a workspace admin -- non-admin SPs get an empty `groups`
+        # attribute back from SCIM regardless of projection.  See the
+        # "App SP SCIM-read gap" section of customers/lh/README.md for
+        # the manual fix when neither path is available.
+        candidates: list[WorkspaceClient] = []
+        if user_token:
+            host = (
+                os.environ.get("DATABRICKS_HOST")
+                or os.environ.get("DATABRICKS_WORKSPACE_URL")
+                or ""
+            )
+            try:
+                candidates.append(
+                    WorkspaceClient(host=host, token=user_token, auth_type="pat"),
+                )
+            except Exception:
+                logger.debug("OBO WorkspaceClient construction failed", exc_info=True)
+        # SP-credentials fallback (works only when the SP is a workspace admin).
+        candidates.append(WorkspaceClient())
+
+        for ws in candidates:
+            try:
+                # Try /Me first when the WorkspaceClient is OBO-bound; for
+                # the SP-creds client /Me would return the SP's own groups,
+                # not the user's, so prefer users.list with projection.
+                if ws is candidates[0] and user_token:
+                    me = ws.current_user.me()
+                    user_groups = me.groups or []
+                else:
+                    users = list(
+                        ws.users.list(
+                            filter=f"userName eq '{email}'",
+                            attributes="id,userName,groups",
+                        )
+                    )
+                    if not users:
+                        continue
+                    user_groups = users[0].groups or []
+            except Exception:
+                logger.debug("SCIM lookup attempt failed", exc_info=True)
+                continue
+
+            for g in user_groups:
+                display = str(getattr(g, "display", "") or "").lower()
+                if display == admin_group_lc:
+                    return "admin"
+            # If we got a non-empty groups list but didn't match, the
+            # user genuinely isn't an admin; no need to try the next
+            # candidate.
+            if user_groups:
+                return "user"
 
         return "user"
     except Exception:
-        logger.warning("Failed to resolve role for '%s'; defaulting to 'user'", email, exc_info=True)
+        logger.warning("Failed to resolve role for %r; defaulting to 'user'", email, exc_info=True)
         return "user"
 
 

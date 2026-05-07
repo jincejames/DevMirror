@@ -7,6 +7,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from databricks.sdk import WorkspaceClient
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
@@ -53,6 +54,8 @@ def current_user_info(
     prefix = current_user.split("@")[0] if "@" in current_user else current_user
     display_name = prefix.replace(".", " ").replace("_", " ").title()
     return UserInfo(email=current_user, role=role, display_name=display_name)
+
+
 
 
 # ---- 1. POST /api/configs (createConfig) ---------------------------------
@@ -424,6 +427,47 @@ def export_config_yaml(
 
 # ---- 8. GET /api/streams/search (searchStreams) --------------------------
 
+_SEARCH_RESULT_CAP = 20
+
+
+def _search_one_workspace(ws_client, q: str, workspace_label: str, cap: int) -> list[StreamSearchResult]:
+    """Search jobs and pipelines in a single workspace, tagging each
+    result with ``workspace_label``.  Returns up to ``cap`` results.
+    Errors are caught and logged at WARNING; partial results are returned.
+    """
+    out: list[StreamSearchResult] = []
+    try:
+        for job in ws_client.jobs.list(name=q):
+            job_name = getattr(job.settings, "name", None) if job.settings else None
+            if job_name:
+                out.append(
+                    StreamSearchResult(name=job_name, type="job", workspace=workspace_label),
+                )
+            if len(out) >= cap:
+                return out
+    except Exception:
+        logger.warning("Failed to search jobs in workspace %r", workspace_label, exc_info=True)
+
+    if len(out) >= cap:
+        return out
+
+    safe_q = q.replace("'", "\\'")
+    try:
+        for pipeline in ws_client.pipelines.list_pipelines(
+            filter=f"name LIKE '%{safe_q}%'",
+        ):
+            pipeline_name = pipeline.name
+            if pipeline_name:
+                out.append(
+                    StreamSearchResult(name=pipeline_name, type="pipeline", workspace=workspace_label),
+                )
+            if len(out) >= cap:
+                return out
+    except Exception:
+        logger.warning("Failed to search pipelines in workspace %r", workspace_label, exc_info=True)
+    return out
+
+
 @router.get(
     "/streams/search",
     response_model=StreamSearchResponse,
@@ -436,43 +480,51 @@ def search_streams(
 ) -> StreamSearchResponse:
     """Search for Databricks jobs and pipelines by name.
 
+    Searches the local workspace (the one the app is deployed in) and,
+    when DEVMIRROR_REMOTE_WORKSPACE_HOST + DEVMIRROR_REMOTE_WORKSPACE_TOKEN
+    are both set, an optional second workspace as well.  Each result is
+    tagged with the workspace's friendly label so the UI can disambiguate
+    matches with the same name in different workspaces.
+
     Authenticated callers only.  Without this gate, anyone reaching the
     container could enumerate every workspace job/pipeline name.
     """
+    import os as _os
+
+    local_label = _os.environ.get("DEVMIRROR_LOCAL_WORKSPACE_LABEL", "").strip() or "local"
     results: list[StreamSearchResult] = []
 
+    # 1. Local workspace -- always searched.
     try:
-        ws_client = db_client.client
-
-        # Search jobs
-        try:
-            for job in ws_client.jobs.list(name=q):
-                job_name = getattr(job.settings, "name", None) if job.settings else None
-                if job_name:
-                    results.append(StreamSearchResult(name=job_name, type="job"))
-                if len(results) >= 20:
-                    break
-        except Exception:
-            logger.warning("Failed to search jobs", exc_info=True)
-
-        # Search pipelines -- escape single quotes in user input to prevent injection
-        if len(results) < 20:
-            try:
-                safe_q = q.replace("'", "\\'")
-                for pipeline in ws_client.pipelines.list_pipelines(
-                    filter=f"name LIKE '%{safe_q}%'"
-                ):
-                    pipeline_name = pipeline.name
-                    if pipeline_name:
-                        results.append(
-                            StreamSearchResult(name=pipeline_name, type="pipeline")
-                        )
-                    if len(results) >= 20:
-                        break
-            except Exception:
-                logger.warning("Failed to search pipelines", exc_info=True)
-
+        results.extend(
+            _search_one_workspace(db_client.client, q, local_label, _SEARCH_RESULT_CAP),
+        )
     except Exception:
-        logger.warning("Failed to initialize workspace client for search", exc_info=True)
+        logger.warning("Failed to search local workspace", exc_info=True)
 
-    return StreamSearchResponse(results=results[:20])
+    # 2. Optional remote workspace -- gated on env vars.
+    remote_host = _os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_HOST", "").strip()
+    remote_token = _os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_TOKEN", "").strip()
+    if (
+        remote_host
+        and remote_token
+        and len(results) < _SEARCH_RESULT_CAP
+    ):
+        remote_label = (
+            _os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_LABEL", "").strip()
+            or remote_host
+        )
+        try:
+            remote_ws = WorkspaceClient(
+                host=remote_host, token=remote_token, auth_type="pat",
+            )
+            remote_cap = _SEARCH_RESULT_CAP - len(results)
+            results.extend(
+                _search_one_workspace(remote_ws, q, remote_label, remote_cap),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to search remote workspace %r", remote_label, exc_info=True,
+            )
+
+    return StreamSearchResponse(results=results[:_SEARCH_RESULT_CAP])

@@ -158,6 +158,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .badge-running,
 .badge-job { background: #dbeafe; color: #1e40af; }
 .badge-pipeline { background: #ede9fe; color: #5b21b6; }
+.badge-workspace { background: #fef3c7; color: #78350f; text-transform: none; }
 .badge-draft,
 .badge-cleaned_up { background: #f1f5f9; color: #475569; }
 .badge-cleanup_in_progress { background: #ffedd5; color: #9a3412; }

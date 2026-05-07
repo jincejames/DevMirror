@@ -75,9 +75,15 @@ export default function StreamSearch({
       {showDropdown && results.length > 0 && (
         <ul className="stream-dropdown">
           {results.map((r) => (
-            <li key={r.name} onMouseDown={() => addStream(r.name)}>
+            <li
+              key={`${r.workspace ?? 'local'}::${r.type}::${r.name}`}
+              onMouseDown={() => addStream(r.name)}
+            >
               <span>{r.name}</span>
               <span className={`badge badge-${r.type}`}>{r.type}</span>
+              {r.workspace && (
+                <span className="badge badge-workspace">{r.workspace}</span>
+              )}
             </li>
           ))}
         </ul>

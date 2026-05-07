@@ -130,12 +130,24 @@ class DevelopmentRequest(BaseModel):
 
     dr_id: str
     description: str | None = None
-    streams: list[StreamRef] = Field(..., min_length=1)
+    # Empty `streams` is allowed when ``additional_objects`` carries one
+    # or more FQNs -- a DR that mirrors an explicit object list without
+    # walking any job/pipeline lineage is a legitimate use case.  The
+    # cross-field check below enforces "at least one of the two".
+    streams: list[StreamRef] = Field(default_factory=list)
     additional_objects: list[str] | None = None
     environments: Environments
     data_revision: DataRevision
     access: Access
     lifecycle: Lifecycle
+
+    @model_validator(mode="after")
+    def _streams_or_additional_objects(self) -> "DevelopmentRequest":
+        if not self.streams and not (self.additional_objects or []):
+            raise ValueError(
+                "At least one stream OR one additional object is required"
+            )
+        return self
 
     @field_validator("dr_id")
     @classmethod

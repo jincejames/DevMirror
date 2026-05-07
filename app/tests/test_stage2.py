@@ -139,6 +139,141 @@ class TestScanConfig:
         sr = resp.json()["manifest"]["scan_result"]
         assert sr["non_prod_additional_objects"] == ["dev_analytics.scratch.foo"]
 
+    @patch("devmirror.scan.lineage.query_table_sizes")
+    @patch("devmirror.scan.dependency_classifier.classify_dependencies")
+    @patch("devmirror.scan.lineage.query_lineage")
+    @patch("devmirror.scan.stream_resolver.resolve_streams")
+    def test_scan_skips_lineage_when_no_streams(
+        self, mock_resolve, mock_lineage, mock_classify, mock_table_sizes,
+        client, mock_db,
+    ):
+        """When `streams` is empty and only `additional_objects` is set,
+        the scan must NOT call resolve_streams or query_lineage at all
+        -- lineage isn't reachable on every customer workspace and
+        querying it for a no-stream DR is wasteful besides."""
+        from devmirror.scan.dependency_classifier import (
+            ClassificationResult,
+            ClassifiedObject,
+        )
+
+        config_in = valid_config_payload(
+            dr_id="DR-1042",
+            streams=[],  # the new behaviour we're testing
+            additional_objects=["cat.sch.only_table"],
+        )
+        row = make_db_row(status="valid", config_json=json.dumps(config_in))
+        mock_db.sql.return_value = [row]
+        mock_db.client = MagicMock()
+
+        mock_classify.return_value = ClassificationResult(
+            objects=[
+                ClassifiedObject(
+                    fqn="cat.sch.only_table",
+                    object_type="table",
+                    access_mode="READ_ONLY",
+                    format="delta",
+                ),
+            ],
+            review_required=True,
+        )
+        mock_table_sizes.return_value = {}
+
+        resp = client.post("/api/configs/DR-1042/scan")
+        assert resp.status_code == 200, resp.text
+
+        # Critical assertion: neither resolve_streams nor query_lineage
+        # ran -- the additional-objects-only path skips them entirely.
+        mock_resolve.assert_not_called()
+        mock_lineage.assert_not_called()
+
+        # The classifier was still called with the additional_objects
+        # (and an empty edges list) so the manifest carries them.
+        mock_classify.assert_called_once()
+        call_args = mock_classify.call_args
+        edges_arg = call_args.args[0] if call_args.args else call_args.kwargs["edges"]
+        assert edges_arg == []
+        ao_arg = call_args.kwargs.get("additional_objects") or (
+            call_args.args[1] if len(call_args.args) > 1 else None
+        )
+        assert ao_arg == ["cat.sch.only_table"]
+
+    @patch("devmirror.scan.lineage.query_table_sizes")
+    @patch("devmirror.scan.dependency_classifier.classify_dependencies")
+    @patch("devmirror.scan.lineage.query_lineage")
+    @patch("devmirror.scan.stream_resolver.resolve_streams")
+    def test_scan_with_streams_and_additional_objects_runs_lineage(
+        self, mock_resolve, mock_lineage, mock_classify, mock_table_sizes,
+        client, mock_db,
+    ):
+        """When BOTH streams and additional_objects are present, the
+        scan walks lineage AND merges the explicit FQNs into the
+        classification."""
+        from devmirror.scan.dependency_classifier import (
+            ClassificationResult,
+            ClassifiedObject,
+        )
+
+        config_in = valid_config_payload(
+            dr_id="DR-1042",
+            streams=["my-job-1"],
+            additional_objects=["prod_core.extra.bonus_table"],
+        )
+        row = make_db_row(status="valid", config_json=json.dumps(config_in))
+        mock_db.sql.return_value = [row]
+        mock_db.client = MagicMock()
+
+        resolved = MagicMock()
+        resolved.name = "my-job-1"
+        resolved.resource_id = "42"
+        resolved.resource_type = "job"
+        resolved.task_keys = []
+        mock_resolve.return_value = ([resolved], [])
+
+        lineage_result = MagicMock()
+        # An edge surfaced by the lineage walk.
+        edge = MagicMock()
+        edge.source_table_fqn = "prod_core.schema.discovered"
+        edge.target_table_fqn = None
+        edge.source_type = "TABLE"
+        edge.target_type = None
+        lineage_result.edges = [edge]
+        lineage_result.row_limit_hit = False
+        mock_lineage.return_value = lineage_result
+
+        # Classifier returns BOTH the lineage-discovered object AND
+        # the explicit additional-objects FQN.
+        mock_classify.return_value = ClassificationResult(
+            objects=[
+                ClassifiedObject(
+                    fqn="prod_core.schema.discovered",
+                    object_type="table",
+                    access_mode="READ_ONLY",
+                    format="delta",
+                ),
+                ClassifiedObject(
+                    fqn="prod_core.extra.bonus_table",
+                    object_type="table",
+                    access_mode="READ_ONLY",
+                    format="delta",
+                ),
+            ],
+            review_required=False,
+        )
+        mock_table_sizes.return_value = {}
+
+        resp = client.post("/api/configs/DR-1042/scan")
+        assert resp.status_code == 200, resp.text
+
+        # Lineage path WAS exercised.
+        mock_resolve.assert_called_once()
+        mock_lineage.assert_called_once()
+
+        # And both objects flow into the manifest.
+        sr = resp.json()["manifest"]["scan_result"]
+        manifest_fqns = {obj["fqn"] for obj in sr["objects"]}
+        assert "prod_core.schema.discovered" in manifest_fqns
+        assert "prod_core.extra.bonus_table" in manifest_fqns
+
 
 # ---- Manifest endpoint tests ----
 

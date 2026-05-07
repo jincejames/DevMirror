@@ -63,6 +63,10 @@ export interface ConfigListResponse {
 export interface StreamSearchResult {
   name: string;
   type: string;
+  // Friendly label of the workspace where the stream was found
+  // (e.g. "local", "prod"). Present when the backend has multi-workspace
+  // search configured; absent on older backends.
+  workspace?: string;
 }
 
 export interface StreamSearchResponse {

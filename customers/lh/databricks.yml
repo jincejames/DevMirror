@@ -1,0 +1,268 @@
+bundle:
+  name: devmirror-lh
+
+# ---------------------------------------------------------------------------
+# Customer bundle: LH
+# ---------------------------------------------------------------------------
+# This is a fully standalone Databricks Asset Bundle for the LH customer.
+# It deliberately does NOT use the root databricks.yml or its `include:`
+# mechanism so that customer-specific configuration stays isolated from the
+# core product config.
+#
+# Workspace : https://adb-7405609894611143.3.azuredatabricks.net (Azure)
+# Owner     : Whoever deploys -- typically a service principal (e.g. the LH
+#             support SP `jince.james.sp@dlh.de`, or `odp-adw-fast-setup-id`
+#             /application_id 39353b5b-2c67-4325-a35a-d2445ad47c5b/ if you
+#             authenticate the CLI as that SP via M2M).
+#             We deliberately do NOT set bundle-level `run_as`: Databricks
+#             Apps require the app owner to match the deploying identity,
+#             so a separate run_as SP would fail validation.  The lifecycle
+#             job and the app therefore share the deployer identity.
+# Compute   : Serverless job compute (no cluster policy, no node_type_id).
+#             The LH workspace must have serverless jobs enabled.
+# Control   : odp_adw_support_n.devmirror Delta tables
+# Admin grp : lhg-odp-adw-support-admin (account-level group)
+#
+# Source layout
+# -------------
+# Paths are relative to this file (customers/lh/):
+#   .                  -> this bundle's sync root
+#   ../../app          -> the FastAPI + React app source (after build_app.sh)
+#   ../..              -> repo root (used as pip wheel build context)
+#   dist/*.whl         -> wheel output, generated INSIDE the sync root by
+#                         the devmirror_wheel artifact and referenced by
+#                         the lifecycle job's serverless environment
+#
+# Deploy
+# ------
+#   cd customers/lh
+#   ../../scripts/build_app.sh         # builds frontend + stages devmirror/
+#   databricks bundle deploy --profile <lh-profile>
+#   databricks bundle run devmirror --profile <lh-profile>
+#
+# The deployer must have CAN_USE on the run-as SP, or run as that SP via
+# an M2M auth profile.
+# ---------------------------------------------------------------------------
+
+variables:
+  warehouse_id:
+    description: SQL warehouse ID
+    default: bda66ae121230af9
+
+  control_catalog:
+    description: Catalog where the DevMirror control / config tables live
+    default: odp_adw_support_n
+
+  control_schema:
+    description: Schema where the DevMirror control / config tables live
+    default: devmirror
+
+  admin_group:
+    description: Account-level group whose members get the admin role in the app
+    default: lhg-odp-adw-support-admin
+
+  admin_emails:
+    description: |
+      Comma-separated list of email addresses granted admin role in the
+      app, bypassing the SCIM group lookup.  Used as a workaround for
+      the LH workspace where the app SP can't read SCIM and OBO
+      user_api_scopes isn't enabled.  Adding/removing admins here
+      requires a redeploy.
+    default: jince.james.sp@dlh.de
+
+  lineage_system_table:
+    description: |
+      Fully-qualified table/view that backs lineage queries.  LH
+      doesn't grant direct access to `system.access.table_lineage`;
+      instead it exposes views under `odp_global.domain_adw` named
+      `sys_<schema>_<table>`.  Default points at the LH view; other
+      customer bundles can override or leave the env var unset to fall
+      back to the engine default `system.access.table_lineage`.
+    default: odp_global.domain_adw.sys_access_table_lineage
+
+  app_name:
+    description: Databricks App resource name
+    default: devmirror
+
+  smtp_password_secret:
+    description: Apps Secret resource key for DEVMIRROR_SMTP_PASSWORD (set when LH enables email)
+    default: ""
+
+  teams_webhook_secret:
+    description: Apps Secret resource key for DEVMIRROR_TEAMS_WEBHOOK_URL (set when LH enables Teams)
+    default: ""
+
+  # ---- Multi-workspace stream search (optional) --------------------------
+  # See customers/lh/README.md > "Multi-workspace stream search" for the
+  # one-time setup (Databricks Apps Secret resource for the remote PAT)
+  # and how to flip these on at deploy time.
+  local_workspace_label:
+    description: Friendly label shown in search results for the local workspace
+    default: local
+
+  remote_workspace_host:
+    description: HTTPS host of the remote workspace to also search (empty = local-only)
+    default: ""
+
+  remote_workspace_label:
+    description: Friendly label shown in search results for the remote workspace
+    default: ""
+
+  remote_workspace_token_secret:
+    description: Apps Secret resource key carrying the PAT for the remote workspace
+    default: ""
+
+# ---------------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------------
+targets:
+  lh:
+    default: true
+    mode: production
+    workspace:
+      host: https://adb-7405609894611143.3.azuredatabricks.net
+      # Production mode requires an explicit root_path.  Pinning under
+      # /Workspace/Shared/devmirror keeps everything DevMirror-related
+      # (bundle artifacts, future shared logs/configs) under one root and
+      # decouples ownership from whichever SP runs the deploy.  The
+      # `.bundle` subdir flags this slice as DAB-managed.
+      #
+      # file_path / artifact_path / state_path / resource_path are all
+      # left at their DAB defaults, which derive from root_path -- so they
+      # also land under /Workspace/Shared/devmirror/.bundle/.  No further
+      # workspace.* overrides needed.
+      root_path: /Workspace/Shared/devmirror/.bundle
+    sync:
+      # Bring in files from outside the bundle dir.  The app/ tree (built
+      # by ../../scripts/build_app.sh) is at the repo root, so we whitelist
+      # it explicitly instead of widening sync to the whole repo.
+      paths:
+        - ../../app
+
+# ---------------------------------------------------------------------------
+# Wheel artifact
+# ---------------------------------------------------------------------------
+# The build context is this bundle directory (customers/lh) so the wheel
+# output lands inside the sync root.  pip is pointed at ../.. (the repo
+# root) for the actual project source.  Result: wheel at
+# customers/lh/dist/devmirror-*.whl, referenced below as dist/*.whl.
+artifacts:
+  devmirror_wheel:
+    type: whl
+    path: .
+    build: pip wheel --no-deps --wheel-dir dist ../..
+
+# ---------------------------------------------------------------------------
+# Resources: lifecycle job + app
+# ---------------------------------------------------------------------------
+resources:
+  jobs:
+    devmirror-lifecycle:
+      name: devmirror-lifecycle
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: UTC
+      # Serverless compute: each task runs in the shared `default`
+      # environment defined below.  No job_clusters, no node_type_id, no
+      # policy_id -- Databricks selects compute on demand.  The wheel is
+      # delivered via the environment's pip dependencies, not per-task
+      # libraries (the libraries block is for classic clusters only).
+      tasks:
+        # named_parameters below get rendered as `--key=value` argv entries
+        # to each entry point.  devmirror.jobs._apply_overrides_from_argv()
+        # promotes them to DEVMIRROR_* env vars before load_settings() runs.
+        # This is the only working channel for serverless job tasks --
+        # compute.Environment doesn't accept env vars, so we pass them as
+        # CLI args and convert them inside the wheel.
+        - task_key: notify
+          environment_key: default
+          python_wheel_task:
+            package_name: devmirror
+            entry_point: devmirror-notify
+            named_parameters:
+              catalog: ${var.control_catalog}
+              schema: ${var.control_schema}
+              warehouse-id: ${var.warehouse_id}
+
+        - task_key: cleanup
+          depends_on:
+            - task_key: notify
+          environment_key: default
+          python_wheel_task:
+            package_name: devmirror
+            entry_point: devmirror-cleanup
+            named_parameters:
+              catalog: ${var.control_catalog}
+              schema: ${var.control_schema}
+              warehouse-id: ${var.warehouse_id}
+
+        - task_key: audit_purge
+          depends_on:
+            - task_key: cleanup
+          environment_key: default
+          python_wheel_task:
+            package_name: devmirror
+            entry_point: devmirror-audit-purge
+            named_parameters:
+              catalog: ${var.control_catalog}
+              schema: ${var.control_schema}
+              warehouse-id: ${var.warehouse_id}
+
+      environments:
+        - environment_key: default
+          spec:
+            # client "2" pulls Databricks' current serverless Python
+            # runtime; bump if a newer client version is required.
+            client: "2"
+            dependencies:
+              # Path is relative to this bundle's sync root.  The wheel is
+              # produced by the devmirror_wheel artifact above into
+              # customers/lh/dist/.
+              - dist/*.whl
+
+  apps:
+    devmirror:
+      name: ${var.app_name}
+      source_code_path: ../../app
+      description: DevMirror -- UC dev environment cloning (LH)
+      config:
+        env:
+          - name: DEVMIRROR_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: DEVMIRROR_CONTROL_CATALOG
+            value: ${var.control_catalog}
+          - name: DEVMIRROR_CONTROL_SCHEMA
+            value: ${var.control_schema}
+          - name: DEVMIRROR_ADMIN_GROUP
+            value: ${var.admin_group}
+          - name: DEVMIRROR_ADMIN_EMAILS
+            value: ${var.admin_emails}
+          - name: DEVMIRROR_LINEAGE_SYSTEM_TABLE
+            value: ${var.lineage_system_table}
+          # SMTP placeholders -- safe to deploy empty; the notifier treats
+          # blank values as "not configured" and no-ops.  When LH wants to
+          # enable notifications, fill these in (or switch to valueFrom:
+          # <secret-key> after pre-creating the Apps Secret resource).
+          - name: DEVMIRROR_SMTP_HOST
+            value: ""
+          - name: DEVMIRROR_SMTP_PORT
+            value: "587"
+          - name: DEVMIRROR_SMTP_USERNAME
+            value: ""
+          - name: DEVMIRROR_SMTP_FROM
+            value: ""
+          - name: DEVMIRROR_SMTP_USE_TLS
+            value: "true"
+          # Multi-workspace stream search.  Empty by default (local-only).
+          # To enable, set the bundle vars `remote_workspace_host`,
+          # `remote_workspace_label`, and `remote_workspace_token_secret`
+          # (the secret-resource key), and switch the TOKEN env entry to
+          # `valueFrom: ${var.remote_workspace_token_secret}`.
+          - name: DEVMIRROR_LOCAL_WORKSPACE_LABEL
+            value: ${var.local_workspace_label}
+          - name: DEVMIRROR_REMOTE_WORKSPACE_HOST
+            value: ${var.remote_workspace_host}
+          - name: DEVMIRROR_REMOTE_WORKSPACE_LABEL
+            value: ${var.remote_workspace_label}
+          - name: DEVMIRROR_REMOTE_WORKSPACE_TOKEN
+            value: ""

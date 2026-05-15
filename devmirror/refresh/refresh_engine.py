@@ -106,10 +106,19 @@ def _filter_objects(
     mode: RefreshMode,
     selected_fqns: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter object rows based on refresh mode."""
+    """Filter object rows based on refresh mode.
+
+    Volume rows are EXCLUDED from every mode -- volumes have no data to
+    refresh (they are user-managed file containers), and
+    ``_generate_object_sql`` would raise ``ClonerError`` on the
+    ``create_volume`` strategy anyway.  Schemas are likewise never
+    touched: the engine only emits ``CREATE OR REPLACE TABLE/VIEW`` /
+    ``TRUNCATE`` for the rows that pass this filter.
+    """
     active = [
         r for r in obj_rows
         if r.get("status") not in (ObjectStatus.DROPPED.value, None)
+        and r.get("object_type") != "volume"
     ]
 
     if mode == "full":

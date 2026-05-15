@@ -8,7 +8,7 @@
 -- Placeholders {control_catalog} and {control_schema} are substituted at runtime.
 
 -- 1. Development Requests
-CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_development_requests (
+CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_development_requests (
     dr_id                STRING      NOT NULL,
     description          STRING,
     status               STRING      NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_developm
 );
 
 -- 2. DR Objects
-CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_dr_objects (
+CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_dr_objects (
     dr_id                STRING      NOT NULL,
     source_fqn           STRING      NOT NULL,
     target_fqn           STRING      NOT NULL,
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_dr_objec
 );
 
 -- 3. DR Access grants
-CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_dr_access (
+CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_dr_access (
     dr_id          STRING      NOT NULL,
     user_email     STRING      NOT NULL,
     environment    STRING      NOT NULL,

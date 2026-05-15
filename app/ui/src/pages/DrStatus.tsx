@@ -472,6 +472,21 @@ export default function DrStatus() {
           <div className="dialog-box" onClick={(e) => e.stopPropagation()}>
             <h3>Refresh DR Objects</h3>
             <p>Re-sync dev objects from production. Choose a refresh mode:</p>
+            <div
+              style={{
+                background: '#f0f9ff',
+                border: '1px solid #bae6fd',
+                borderRadius: 4,
+                padding: '8px 12px',
+                marginBottom: 12,
+                fontSize: '0.875rem',
+              }}
+            >
+              <strong>Safe by design:</strong> refresh only re-clones the
+              underlying tables and views via <code>CREATE OR REPLACE</code>.
+              Schemas, grants, and Volumes are never dropped, so other
+              objects in the same schema are untouched.
+            </div>
             <div className="form-field">
               <label htmlFor="refresh-mode">Mode</label>
               <select
@@ -491,7 +506,12 @@ export default function DrStatus() {
               <div className="form-field">
                 <label>Select objects to refresh:</label>
                 <div style={{ maxHeight: 200, overflow: 'auto', border: '1px solid #d1d5db', borderRadius: 4, padding: 8 }}>
-                  {data.objects.map((obj, i) => (
+                  {data.objects
+                    // Volumes can't be refreshed (no data inside the
+                    // container) -- hide them from the picker so users
+                    // don't select them and get a per-row failure.
+                    .filter((obj) => obj.object_type !== 'volume')
+                    .map((obj, i) => (
                     <label key={i} style={{ display: 'block', marginBottom: 4 }}>
                       <input
                         type="checkbox"

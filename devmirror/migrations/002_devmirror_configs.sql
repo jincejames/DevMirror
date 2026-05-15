@@ -2,7 +2,7 @@
 -- Stores user-created configs from the web app before they become full DRs.
 -- Placeholders {control_catalog} and {control_schema} are substituted at runtime.
 
-CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_configs (
+CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_configs (
     dr_id STRING,
     config_json STRING,
     config_yaml STRING,
@@ -12,5 +12,7 @@ CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_configs 
     created_by STRING,
     updated_at STRING,
     expiration_date STRING,
-    description STRING
+    description STRING,
+    manifest_json STRING,
+    scanned_at STRING
 );

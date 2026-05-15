@@ -68,8 +68,16 @@ def _get_repo(settings: Settings, db_client: DbClient | None = None) -> ConfigRe
 
 
 @contextmanager
-def _target_catalog_override(target_catalog: str | None):
-    """Temporarily set DEVMIRROR_TARGET_CATALOG for a per-DR override.
+def _target_catalog_override(target_catalog: str | None, dr_id: str | None = None):
+    """Temporarily set DEVMIRROR_TARGET_CATALOG for a per-DR explicit
+    override.  When set, ``resolve_target_catalog()`` returns this value
+    for every object regardless of source catalog.  Use sparingly -- the
+    default LH behaviour (base + suffix per object) is preferred.
+
+    Emits an INFO log line when the override fires so operators can grep
+    app logs for "target_catalog override" and correlate unexpected
+    target FQNs with the request that set the override (the user-facing
+    audit log only records target FQNs after the fact).
 
     NOTE: This is not thread-safe.  If two requests run concurrently with
     different target catalogs the env-var override will conflict.  This is
@@ -79,6 +87,11 @@ def _target_catalog_override(target_catalog: str | None):
     if not target_catalog:
         yield
         return
+    logger.info(
+        "target_catalog override active for DR %s: every object will be "
+        "cloned into %s (per-object base+suffix routing bypassed)",
+        dr_id or "<unknown>", target_catalog,
+    )
     old = os.environ.get("DEVMIRROR_TARGET_CATALOG")
     os.environ["DEVMIRROR_TARGET_CATALOG"] = target_catalog
     try:
@@ -265,7 +278,7 @@ def _auto_scan(
 ) -> None:
     """Auto-scan after a valid config is saved. Silently skips on failure."""
     try:
-        with _target_catalog_override(config_in.target_catalog):
+        with _target_catalog_override(config_in.target_catalog, dr_id=dr_id):
             manifest = _run_scan(db_client, settings, dm_config)
         manifest_json = json.dumps(manifest)
         scanned_at = datetime.now(UTC).isoformat()

@@ -43,7 +43,7 @@ function NavHeader() {
   const { email, role } = useUser();
   return (
     <header className="app-header">
-      <Link to="/" className="app-title">DevMirror</Link>
+      <Link to="/" className="app-title">FastSetup</Link>
       <nav className="app-nav">
         <Link to="/" className={isConfigs ? 'active' : ''}>Configs</Link>
         <Link to="/drs" className={isDrs ? 'active' : ''}>Active DRs</Link>

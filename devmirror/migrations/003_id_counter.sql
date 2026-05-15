@@ -4,7 +4,7 @@
 --
 -- Placeholders {control_catalog} and {control_schema} are substituted at runtime.
 
-CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.devmirror_id_counter (
+CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_id_counter (
     prefix      STRING      NOT NULL,
     last_value  BIGINT      NOT NULL,
     updated_at  TIMESTAMP   NOT NULL

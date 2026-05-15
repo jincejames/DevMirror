@@ -112,3 +112,16 @@ logs/
 .ipynb_checkpoints/
 *.orig
 *.rej
+
+# ---- Databricks Apps wheel exception ---------------------------------------
+# The DevMirror engine wheel is built into ``app/dist/`` by
+# ``scripts/build_app.sh`` and by the customer bundle's
+# ``artifacts.devmirror_wheel`` step.  Databricks Asset Bundles respect
+# .gitignore for sync, and the broad ``dist/`` / ``*.whl`` rules above
+# would otherwise strip the wheel from the deployed app source --
+# causing ``app/requirements.txt``'s install line to fail with "no such
+# file".  Re-include just this one path.  The wheel is rebuilt on every
+# deploy and should not be committed; if a developer accidentally
+# stages it, that's caught at code review.
+!app/dist/
+!app/dist/*.whl

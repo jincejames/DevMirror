@@ -281,6 +281,64 @@ class TestDrObjectRepository:
         assert "DELETE FROM" in called_sql
         assert params == {"dr_id": "DR-1"}
 
+    def test_counts_by_dr_id_empty_input(self) -> None:
+        # No DRs to count -> short-circuit, no SQL issued.
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        result = repo.counts_by_dr_id(db, dr_ids=[])
+        assert result == {}
+        db.sql.assert_not_called()
+
+    def test_counts_by_dr_id_returns_map(self) -> None:
+        # The query is now an unfiltered GROUP BY; the repo filters by
+        # dr_ids in Python.  DR-X exists in the table but isn't in the
+        # caller's wanted list -- it's omitted from the result map.
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        db.sql.return_value = [
+            {"dr_id": "DR-1", "n": 5},
+            {"dr_id": "DR-2", "n": 12},
+            {"dr_id": "DR-X", "n": 99},
+        ]
+        result = repo.counts_by_dr_id(db, dr_ids=["DR-1", "DR-2", "DR-3"])
+        assert result == {"DR-1": 5, "DR-2": 12}
+        # DR-3 is absent from the result map -- caller treats absence as 0.
+        # DR-X exists in the table but wasn't requested -- correctly dropped.
+
+    def test_counts_by_dr_id_sql_shape(self) -> None:
+        # No WHERE, no params -- intentionally simple to dodge any
+        # upstream IN-clause/named-param edge cases.
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        db.sql.return_value = []
+        repo.counts_by_dr_id(db, dr_ids=["DR-1", "DR-2"])
+        sql = db.sql.call_args[0][0]
+        assert "COUNT(*)" in sql
+        assert "GROUP BY dr_id" in sql
+        assert "WHERE" not in sql
+        # Verify no named-param SQL path was used.
+        db.sql_with_params.assert_not_called()
+
+    def test_counts_by_dr_id_handles_string_counts(self) -> None:
+        # Statement Execution API JSON_ARRAY format returns numbers
+        # as strings; the repo must coerce.
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        db.sql.return_value = [{"dr_id": "DR-1", "n": "7"}]
+        result = repo.counts_by_dr_id(db, dr_ids=["DR-1"])
+        assert result == {"DR-1": 7}
+
+    def test_counts_by_dr_id_skips_malformed_rows(self) -> None:
+        # Rows with missing/unparseable values shouldn't blow up the
+        # whole call -- they're skipped, the rest are returned.
+        repo, db = DrObjectRepository(FQN), _mock_db()
+        db.sql.return_value = [
+            {"dr_id": "DR-1", "n": 5},
+            {"dr_id": None, "n": 99},          # missing dr_id
+            {"dr_id": "DR-2", "n": "not-a-number"},
+            {"dr_id": "DR-3", "n": 3},
+        ]
+        result = repo.counts_by_dr_id(
+            db, dr_ids=["DR-1", "DR-2", "DR-3"],
+        )
+        assert result == {"DR-1": 5, "DR-3": 3}
+
 
 # ------------------------------------------------------------------
 # DrAccessRepository
@@ -331,7 +389,7 @@ class TestDDL:
         stmts = render_ddl("c", "s")
         assert len(stmts) == 4
         joined = "\n".join(stmts)
-        for name in ["devmirror_development_requests", "devmirror_dr_objects", "devmirror_dr_access", "audit_log"]:
+        for name in ["fastsetup_development_requests", "fastsetup_dr_objects", "fastsetup_dr_access", "audit_log"]:
             assert name in joined
         assert "{control_catalog}" not in joined
 

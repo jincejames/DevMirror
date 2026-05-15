@@ -1,4 +1,4 @@
-"""Repository layer for the devmirror_configs table."""
+"""Repository layer for the fastsetup_configs table."""
 
 from __future__ import annotations
 
@@ -18,32 +18,14 @@ def _param_or_null(params: dict, key: str, value: str | None) -> str:
 
 
 class ConfigRepository:
-    """CRUD operations for ``devmirror_configs``."""
+    """CRUD operations for ``fastsetup_configs``."""
 
     def __init__(self, fqn_prefix: str) -> None:
-        self._table = f"{fqn_prefix}.devmirror_configs"
+        self._table = f"{fqn_prefix}.fastsetup_configs"
 
     @property
     def table_fqn(self) -> str:
         return self._table
-
-    def ensure_table(self, db_client: DbClient) -> None:
-        """Create the configs table if it doesn't exist, and add Stage 2 columns."""
-        db_client.sql_exec(
-            f"CREATE TABLE IF NOT EXISTS {self._table} ("
-            "dr_id STRING, config_json STRING, config_yaml STRING, "
-            "status STRING, validation_errors STRING, created_at STRING, "
-            "created_by STRING, updated_at STRING, expiration_date STRING, "
-            "description STRING, manifest_json STRING, scanned_at STRING)"
-        )
-        # Migrate existing tables that lack the new columns
-        for col in ("manifest_json STRING", "scanned_at STRING"):
-            try:
-                db_client.sql_exec(
-                    f"ALTER TABLE {self._table} ADD COLUMNS ({col})"
-                )
-            except Exception:  # noqa: BLE001
-                pass  # Column already exists
 
     def insert(
         self,

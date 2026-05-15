@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from devmirror.config.schema import (
@@ -36,6 +38,9 @@ class ConfigIn(BaseModel):
     description: str | None = None
     streams: list[str]
     additional_objects: list[str] | None = None
+    # Optional explicit override.  When set, every object in the DR is
+    # cloned into this catalog regardless of its source base.  Leave
+    # unset to use the per-object base+suffix routing (LH default).
     target_catalog: str | None = None
     qa_enabled: bool = False
     data_revision_mode: str = "latest"
@@ -64,6 +69,48 @@ class ConfigIn(BaseModel):
     def _at_least_one_developer(cls, v: list[str]) -> list[str]:
         if not v:
             raise ValueError("At least one developer is required")
+        return v
+
+    @field_validator("additional_objects", mode="before")
+    @classmethod
+    def _normalize_additional_objects(cls, v):
+        # Accept either:
+        #   - None / missing field           -> None
+        #   - list[str]                      -> trimmed, blanks dropped
+        #   - str (possibly multi-line,
+        #     comma- or newline-separated)   -> parsed into list
+        # The UI sends the cleaned list directly, but direct-API callers
+        # (and copy-pasted payloads from a SQL workbench) commonly send a
+        # single string with mixed separators.  Normalising here keeps
+        # all clients DRY and lets a request of either shape succeed.
+        if v is None:
+            return None
+        if isinstance(v, str):
+            tokens = re.split(r"[,\n]", v)
+            return [t.strip() for t in tokens if t.strip()]
+        if isinstance(v, list):
+            return [str(t).strip() for t in v if str(t).strip()]
+        return v
+
+    @field_validator("target_catalog")
+    @classmethod
+    def _validate_target_catalog(cls, v: str | None) -> str | None:
+        # None / empty / whitespace -> treat as unset so the per-object
+        # base+suffix routing kicks in.  Otherwise enforce a bare
+        # Databricks UC identifier so a typo (hyphen, space, etc.) is
+        # caught at submit time instead of failing mid-clone with an
+        # opaque Spark parse error.
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v):
+            raise ValueError(
+                "target_catalog must be a bare Databricks identifier "
+                "(letters, digits, underscores; first character a letter "
+                f"or underscore). Got: {v!r}"
+            )
         return v
 
     def to_devmirror_config(self) -> DevMirrorConfig:

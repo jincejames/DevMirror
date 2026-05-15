@@ -82,7 +82,7 @@ def scan_config(
     config_in = _parse_config_in(row["config_json"])
     dm_config = config_in.to_devmirror_config()
 
-    with _target_catalog_override(config_in.target_catalog):
+    with _target_catalog_override(config_in.target_catalog, dr_id=dr_id):
         manifest = _run_scan(db_client, settings, dm_config)
 
     # Store manifest in config row
@@ -230,7 +230,7 @@ def provision_config(
     tc = config_in.target_catalog
 
     def do_provision() -> dict:
-        with _target_catalog_override(tc):
+        with _target_catalog_override(tc, dr_id=dr_id):
             result = provision_dr(
                 dm_config,
                 manifest,
@@ -373,24 +373,41 @@ def list_drs(
     role: str = Depends(get_user_role),
 ) -> DrListResponse:
     """List all provisioned DRs from the control table."""
-    dr_repo, _obj_repo, _access_repo, _audit_repo = _control_repos(settings)
+    dr_repo, obj_repo, _access_repo, _audit_repo = _control_repos(settings)
 
     rows = dr_repo.list_active(db_client)
     if role != "admin":
         rows = [r for r in rows if r.get("created_by") == current_user]
-    items: list[DrListItem] = []
-    for row in rows:
-        items.append(
-            DrListItem(
-                dr_id=row.get("dr_id", ""),
-                status=row.get("status", "UNKNOWN"),
-                description=row.get("description"),
-                expiration_date=row.get("expiration_date", ""),
-                created_at=row.get("created_at", ""),
-                created_by=row.get("created_by", ""),
-                total_objects=0,
-            )
+
+    # Single grouped query for object counts -- much cheaper than calling
+    # obj_repo.list_by_dr_id once per DR (was the only available API
+    # before, which is why list_drs hardcoded total_objects=0).
+    # Defensive: a failure here must not 500 the whole DR list.  If the
+    # count query fails for any reason (transient warehouse error, schema
+    # quirk, etc.) we log + fall back to 0 counts so the rest of the page
+    # still renders.  The actual error lands in app logs for follow-up.
+    dr_ids = [r.get("dr_id", "") for r in rows if r.get("dr_id")]
+    try:
+        counts = obj_repo.counts_by_dr_id(db_client, dr_ids=dr_ids)
+    except Exception:
+        logger.warning(
+            "counts_by_dr_id failed for /api/drs; rendering counts as 0",
+            exc_info=True,
         )
+        counts = {}
+
+    items: list[DrListItem] = [
+        DrListItem(
+            dr_id=row.get("dr_id", ""),
+            status=row.get("status", "UNKNOWN"),
+            description=row.get("description"),
+            expiration_date=row.get("expiration_date", ""),
+            created_at=row.get("created_at", ""),
+            created_by=row.get("created_by", ""),
+            total_objects=counts.get(row.get("dr_id", ""), 0),
+        )
+        for row in rows
+    ]
 
     return DrListResponse(drs=items, total=len(items))
 
@@ -572,7 +589,7 @@ def reprovision_dr_endpoint(
     tc = config_in.target_catalog
 
     def do_reprovision() -> dict:
-        with _target_catalog_override(tc):
+        with _target_catalog_override(tc, dr_id=dr_id):
             # Re-run scan with current config
             try:
                 manifest = _run_scan(db_client, settings, dm_config)

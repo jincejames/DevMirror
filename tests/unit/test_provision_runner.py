@@ -57,11 +57,11 @@ def _cfg(dr_id="DR-1042", qa=False, rev_mode="latest", rev_ver=None, rev_ts=None
 def _manifest(objects=None, schemas=None):
     if objects is None:
         objects = [
-            {"fqn": "prod_analytics.customers.profile", "type": "table", "access_mode": "READ_ONLY", "estimated_size_gb": 10.0},
-            {"fqn": "prod_analytics.customers.churn_scores", "type": "table", "access_mode": "READ_WRITE", "estimated_size_gb": 2.0},
+            {"fqn": "prod_analytics_p.customers.profile", "type": "table", "access_mode": "READ_ONLY", "estimated_size_gb": 10.0},
+            {"fqn": "prod_analytics_p.customers.churn_scores", "type": "table", "access_mode": "READ_WRITE", "estimated_size_gb": 2.0},
         ]
     if schemas is None:
-        schemas = ["prod_analytics.customers"]
+        schemas = ["prod_analytics_p.customers"]
     return {"scan_result": {
         "dr_id": "DR-1042", "scanned_at": "2026-04-13T10:00:00Z",
         "streams_scanned": [{"name": "test_stream", "workflow_id": "123"}],
@@ -106,8 +106,8 @@ class TestBuildObjectRows:
         assert len(rows) == 2
         r = rows[0]
         assert r["dr_id"] == "DR-1042"
-        assert r["source_fqn"] == "prod_analytics.customers.profile"
-        assert r["target_fqn"] == "dev_analytics.dr_1042_customers.profile"
+        assert r["source_fqn"] == "prod_analytics_p.customers.profile"
+        assert r["target_fqn"] == "prod_analytics_n.dr_1042_customers.profile"
         assert r["clone_strategy"] == "shallow_clone"
         assert r["clone_revision_mode"] == "latest"
 
@@ -121,14 +121,42 @@ class TestBuildObjectRows:
         assert rows[0]["clone_revision_value"] == expected_val
 
     def test_view_gets_view_strategy(self) -> None:
-        m = _manifest(objects=[{"fqn": "prod_analytics.shared.v", "type": "view", "access_mode": "READ_ONLY"}],
-                      schemas=["prod_analytics.shared"])
+        m = _manifest(objects=[{"fqn": "prod_analytics_p.shared.v", "type": "view", "access_mode": "READ_ONLY"}],
+                      schemas=["prod_analytics_p.shared"])
         assert _build_object_rows(_cfg(), m, "dev")[0]["clone_strategy"] == "view"
 
     def test_manifest_strategy_override(self) -> None:
-        m = _manifest(objects=[{"fqn": "prod_analytics.customers.profile", "type": "table",
+        m = _manifest(objects=[{"fqn": "prod_analytics_p.customers.profile", "type": "table",
                                 "access_mode": "READ_ONLY", "clone_strategy": "deep_clone"}])
         assert _build_object_rows(_cfg(), m, "dev")[0]["clone_strategy"] == "deep_clone"
+
+    def test_mixed_base_catalogs_route_per_object(self) -> None:
+        # Two source catalogs with different bases (LH SDLC suffix scheme).
+        # Each object's clone must land in *its own* base catalog with the
+        # env's suffix attached -- not all in a single shared target.
+        m = _manifest(
+            objects=[
+                {"fqn": "odp_adw_ancillaries_p.sales.bookings", "type": "table",
+                 "access_mode": "READ_ONLY"},
+                {"fqn": "odp_adw_offers_p.catalog.promos", "type": "table",
+                 "access_mode": "READ_ONLY"},
+            ],
+            schemas=["odp_adw_ancillaries_p.sales", "odp_adw_offers_p.catalog"],
+        )
+
+        dev_rows = _build_object_rows(_cfg(), m, "dev")
+        dev_targets = {r["target_fqn"] for r in dev_rows}
+        assert dev_targets == {
+            "odp_adw_ancillaries_n.dr_1042_sales.bookings",
+            "odp_adw_offers_n.dr_1042_catalog.promos",
+        }
+
+        qa_rows = _build_object_rows(_cfg(qa=True), m, "qa")
+        qa_targets = {r["target_fqn"] for r in qa_rows}
+        assert qa_targets == {
+            "odp_adw_ancillaries_i.qa_1042_sales.bookings",
+            "odp_adw_offers_i.qa_1042_catalog.promos",
+        }
 
 
 # ------------------------------------------------------------------
@@ -137,10 +165,112 @@ class TestBuildObjectRows:
 
 class TestGetSchemasForEnv:
     def test_dev_schemas(self) -> None:
-        assert _get_schemas_for_env(_cfg(), _manifest(), "dev") == ["dev_analytics.dr_1042_customers"]
+        assert _get_schemas_for_env(_cfg(), _manifest(), "dev") == ["prod_analytics_n.dr_1042_customers"]
 
     def test_qa_schemas(self) -> None:
-        assert _get_schemas_for_env(_cfg(qa=True), _manifest(), "qa") == ["dev_analytics.qa_1042_customers"]
+        assert _get_schemas_for_env(_cfg(qa=True), _manifest(), "qa") == ["prod_analytics_i.qa_1042_customers"]
+
+
+# ------------------------------------------------------------------
+# Per-DR import schemas + Volume rows
+# ------------------------------------------------------------------
+
+from devmirror.provision.runner import (  # noqa: E402
+    _get_import_schemas_for_env,
+    _get_import_volume_rows_for_env,
+)
+
+
+class TestImportSchemasForEnv:
+    """One import schema per source catalog per env, gated by the
+    DEVMIRROR_IMPORT_SCHEMA_SUFFIX env var (so deployments that don't
+    want the feature pay zero cost)."""
+
+    def test_disabled_by_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", raising=False)
+        assert _get_import_schemas_for_env(_manifest(), "DR-1042", "dev") == []
+
+    def test_empty_suffix_disables(self, monkeypatch) -> None:
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "")
+        assert _get_import_schemas_for_env(_manifest(), "DR-1042", "dev") == []
+
+    def test_single_catalog(self, monkeypatch) -> None:
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        result = _get_import_schemas_for_env(_manifest(), "DR-1042", "dev")
+        assert result == ["prod_analytics_n.dr_1042_import_main"]
+
+    def test_qa_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        # Note: QA catalog suffix defaults to `_i` in the resolver, so the
+        # target catalog reflects that default.  LH overrides it to `_n`
+        # via DEVMIRROR_QA_CATALOG_SUFFIX in app.yaml.
+        result = _get_import_schemas_for_env(_manifest(), "DR-1042", "qa")
+        assert result == ["prod_analytics_i.qa_1042_import_main"]
+
+    def test_multiple_source_catalogs(self, monkeypatch) -> None:
+        # Two distinct base catalogs in one manifest -> two import schemas.
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        m = _manifest(
+            objects=[
+                {"fqn": "odp_adw_ancillaries_p.sales.bookings", "type": "table",
+                 "access_mode": "READ_ONLY"},
+                {"fqn": "odp_adw_offers_p.catalog.promos", "type": "table",
+                 "access_mode": "READ_ONLY"},
+            ],
+            schemas=["odp_adw_ancillaries_p.sales", "odp_adw_offers_p.catalog"],
+        )
+        result = _get_import_schemas_for_env(m, "DR-1042", "dev")
+        assert set(result) == {
+            "odp_adw_ancillaries_n.dr_1042_import_main",
+            "odp_adw_offers_n.dr_1042_import_main",
+        }
+
+
+class TestImportVolumeRowsForEnv:
+    """One volume row per source catalog per env, gated by both env vars.
+    Volume rows ride through the same provisioning + cleanup pipeline as
+    regular clones via object_type=volume / strategy=create_volume."""
+
+    def test_disabled_when_either_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", raising=False)
+        monkeypatch.delenv("DEVMIRROR_IMPORT_VOLUME_NAME", raising=False)
+        assert _get_import_volume_rows_for_env(_cfg(), _manifest(), "dev") == []
+
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        # Suffix set but volume name still empty -> still disabled.
+        assert _get_import_volume_rows_for_env(_cfg(), _manifest(), "dev") == []
+
+    def test_row_shape(self, monkeypatch) -> None:
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        monkeypatch.setenv("DEVMIRROR_IMPORT_VOLUME_NAME", "main_volume")
+        rows = _get_import_volume_rows_for_env(_cfg(), _manifest(), "dev")
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["target_fqn"] == "prod_analytics_n.dr_1042_import_main.main_volume"
+        assert r["object_type"] == "volume"
+        assert r["clone_strategy"] == "create_volume"
+        # source_fqn stores the source catalog for audit -- not used by
+        # the clone path (which short-circuits for create_volume).
+        assert r["source_fqn"] == "prod_analytics_p"
+
+    def test_multi_catalog(self, monkeypatch) -> None:
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        monkeypatch.setenv("DEVMIRROR_IMPORT_VOLUME_NAME", "main_volume")
+        m = _manifest(
+            objects=[
+                {"fqn": "odp_adw_ancillaries_p.sales.bookings", "type": "table",
+                 "access_mode": "READ_ONLY"},
+                {"fqn": "odp_adw_offers_p.catalog.promos", "type": "table",
+                 "access_mode": "READ_ONLY"},
+            ],
+            schemas=["odp_adw_ancillaries_p.sales", "odp_adw_offers_p.catalog"],
+        )
+        rows = _get_import_volume_rows_for_env(_cfg(), m, "dev")
+        targets = {r["target_fqn"] for r in rows}
+        assert targets == {
+            "odp_adw_ancillaries_n.dr_1042_import_main.main_volume",
+            "odp_adw_offers_n.dr_1042_import_main.main_volume",
+        }
 
 
 # ------------------------------------------------------------------
@@ -174,8 +304,164 @@ class TestProvisionDr:
         (result, _, _, acc, _) = _provision(config=_cfg(qa=True))
         assert result.final_status == "ACTIVE"
         assert len(result.objects_succeeded) == 4
-        envs = {r["environment"] for r in acc.bulk_insert.call_args[1]["rows"]}
+        rows = acc.bulk_insert.call_args[1]["rows"]
+        envs = {r["environment"] for r in rows}
         assert envs == {"dev", "qa"}
+        # Grant matrix: developer (dev@company.com) has RW in BOTH dev and
+        # qa rows; qa user (qa@company.com) has READ_ONLY in qa.
+        by_principal = {
+            (r["user_email"], r["environment"]): r["access_level"]
+            for r in rows
+        }
+        assert by_principal[("dev@company.com", "dev")] == "READ_WRITE"
+        assert by_principal[("dev@company.com", "qa")] == "READ_WRITE"
+        assert by_principal[("qa@company.com", "qa")] == "READ_ONLY"
+
+    def test_qa_grants_developers_rw_and_qa_users_ro(self) -> None:
+        """End-to-end grant matrix: developer principal gets MODIFY on
+        QA schema + WRITE_VOLUME on QA volume; qa_user gets neither.
+        """
+        from databricks.sdk.service.catalog import Privilege, SecurableType
+
+        from devmirror.provision.access_manager import (
+            _principal_cache,
+            _principal_cache_lock,
+        )
+        with _principal_cache_lock:
+            _principal_cache.clear()
+
+        db = _mock_db()
+        found = MagicMock()
+        db.client.users.list.return_value = [found]
+        db.client.groups.list.return_value = [found]
+
+        (result, *_) = _provision(config=_cfg(qa=True), db=db)
+        assert result.final_status == "ACTIVE"
+
+        # Aggregate schema grants by (target, principal) -> set of privileges.
+        schema_grants: dict[tuple[str, str], set] = {}
+        for call in db.grant.call_args_list:
+            sec_type, fqn, principal, privs = call.args
+            if sec_type == SecurableType.SCHEMA:
+                schema_grants.setdefault((fqn, principal), set()).update(privs)
+
+        qa_schema = "prod_analytics_i.qa_1042_customers"
+        # Developer must have MODIFY on the QA schema.
+        assert Privilege.MODIFY in schema_grants.get(
+            (qa_schema, "dev@company.com"), set(),
+        )
+        # QA user must NOT have MODIFY on the QA schema.
+        assert Privilege.MODIFY not in schema_grants.get(
+            (qa_schema, "qa@company.com"), set(),
+        )
+        # QA user still has SELECT (read access).
+        assert Privilege.SELECT in schema_grants.get(
+            (qa_schema, "qa@company.com"), set(),
+        )
+
+    def test_qa_user_also_developer_not_duplicated(self) -> None:
+        """If alice@ is in both developers and qa_users, the QA-user RO
+        pass skips her -- she already has RW from the developer pass."""
+        from devmirror.config.schema import (
+            Access,
+            DataRevision,
+            DevelopmentRequest,
+            DevMirrorConfig,
+            EnvironmentDev,
+            EnvironmentQA,
+            Environments,
+            Lifecycle,
+            StreamRef,
+        )
+        from devmirror.provision.access_manager import (
+            _principal_cache,
+            _principal_cache_lock,
+        )
+        with _principal_cache_lock:
+            _principal_cache.clear()
+
+        cfg = DevMirrorConfig(
+            version="1.0",
+            development_request=DevelopmentRequest(
+                dr_id="DR-1042", description="Test DR",
+                streams=[StreamRef(name="test_stream")],
+                environments=Environments(
+                    dev=EnvironmentDev(),
+                    qa=EnvironmentQA(enabled=True),
+                ),
+                data_revision=DataRevision(mode="latest"),
+                access=Access(
+                    developers=["alice@company.com"],
+                    qa_users=["alice@company.com"],   # same person in both
+                ),
+                lifecycle=Lifecycle(expiration_date="2099-12-31"),
+            ),
+        )
+
+        db = _mock_db()
+        found = MagicMock()
+        db.client.users.list.return_value = [found]
+        db.client.groups.list.return_value = [found]
+
+        (result, _dr, _obj, acc, _aud) = _provision(config=cfg, db=db)
+        assert result.final_status == "ACTIVE"
+
+        # access_rows must NOT duplicate alice's qa entry -- exactly one
+        # row per (email, env), and the qa one is READ_WRITE (developer
+        # pass wins).
+        rows = acc.bulk_insert.call_args[1]["rows"]
+        alice_qa = [
+            r for r in rows
+            if r["user_email"] == "alice@company.com"
+            and r["environment"] == "qa"
+        ]
+        assert len(alice_qa) == 1
+        assert alice_qa[0]["access_level"] == "READ_WRITE"
+
+    def test_volume_grants_dev_rw_and_qa_readonly(self, monkeypatch) -> None:
+        # Enable the import-schema feature and verify volume grants:
+        #   dev volume -> developer principals get READ_VOLUME + WRITE_VOLUME
+        #   qa volume  -> qa principals get READ_VOLUME only
+        from databricks.sdk.service.catalog import Privilege, SecurableType
+
+        from devmirror.provision.access_manager import (
+            _principal_cache,
+            _principal_cache_lock,
+        )
+        with _principal_cache_lock:
+            _principal_cache.clear()
+
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        monkeypatch.setenv("DEVMIRROR_IMPORT_VOLUME_NAME", "main_volume")
+
+        db = _mock_db()
+        # Wire SCIM so apply_volume_grants accepts the principals.
+        found = MagicMock()
+        db.client.users.list.return_value = [found]
+        db.client.groups.list.return_value = [found]
+
+        (result, *_) = _provision(config=_cfg(qa=True), db=db)
+        assert result.final_status == "ACTIVE"
+
+        # Find every grant call against SecurableType.VOLUME and group
+        # by (target_fqn, principal) -> set of privileges.
+        vol_grants: dict[tuple[str, str], set] = {}
+        for call in db.grant.call_args_list:
+            sec_type, fqn, principal, privs = call.args
+            if sec_type == SecurableType.VOLUME:
+                vol_grants.setdefault((fqn, principal), set()).update(privs)
+
+        # Dev volume: developer should have BOTH READ and WRITE.
+        dev_vol = "prod_analytics_n.dr_1042_import_main.main_volume"
+        assert vol_grants[(dev_vol, "dev@company.com")] == {
+            Privilege.READ_VOLUME, Privilege.WRITE_VOLUME,
+        }
+        # QA volume: QA user should have READ only (no WRITE).
+        # Default QA catalog suffix is `_i` (LH overrides to `_n` via env;
+        # not set here, so default applies).
+        qa_vol = "prod_analytics_i.qa_1042_import_main.main_volume"
+        assert vol_grants[(qa_vol, "qa@company.com")] == {Privilege.READ_VOLUME}
+        assert Privilege.WRITE_VOLUME not in vol_grants[(qa_vol, "qa@company.com")]
 
     def test_empty_manifest(self) -> None:
         (result, *_) = _provision(manifest=_manifest(objects=[], schemas=[]))
@@ -187,12 +473,8 @@ class TestProvisionDr:
         # via force_status (no CAS) -- guards against the silent-no-op
         # regression where the row stayed at FAILED forever.
         dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
-        # Existing FAILED row -- insert raises so the runner takes the
-        # "row exists, force into PROVISIONING" branch.
-        dr.get.return_value = {"dr_id": "DR-1042", "status": "ACTIVE"}  # post-run read-back returns the new value
-        dr.insert.side_effect = Exception("row exists")
-        # The very first dr.get (existing_dr fetch) should see FAILED; the
-        # read-back at the end should see ACTIVE.  Use side_effect for that.
+        # The first dr.get (existing_dr fetch) should see FAILED; the
+        # read-back at the end should see ACTIVE.
         dr.get.side_effect = [
             {"dr_id": "DR-1042", "status": "FAILED"},
             {"dr_id": "DR-1042", "status": "ACTIVE"},
@@ -207,6 +489,86 @@ class TestProvisionDr:
         # update_status (CAS-gated) must NOT be called from inside the
         # runner -- that's the whole point of switching to force_status.
         dr.update_status.assert_not_called()
+        # Critically: re-provision must NOT call insert -- Delta has no PK
+        # so a duplicate INSERT would silently create a second row for the
+        # same dr_id, which the UI then renders as a duplicate tile.
+        dr.insert.assert_not_called()
+
+    def test_reprovision_active_dr_does_not_duplicate_row(self) -> None:
+        # Re-provisioning an already-ACTIVE DR must update in place
+        # (force_status), never INSERT.  Without this guard the row would
+        # duplicate every time someone clicked "re-provision".
+        dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        dr.get.side_effect = [
+            {"dr_id": "DR-1042", "status": "ACTIVE"},   # existing row
+            {"dr_id": "DR-1042", "status": "ACTIVE"},   # post-run read-back
+        ]
+        result = provision_dr(_cfg(), _manifest(),
+                              db_client=_mock_db(), dr_repo=dr, obj_repo=obj,
+                              access_repo=acc, audit_repo=aud, force_replace=True)
+        assert result.final_status == "ACTIVE"
+        dr.insert.assert_not_called()
+        statuses = [c.kwargs["new_status"].value for c in dr.force_status.call_args_list]
+        assert statuses[0] == "PROVISIONING"   # pre-run normalize
+        assert statuses[-1] == "ACTIVE"        # post-run finalize
+
+    def test_first_time_provision_inserts(self) -> None:
+        # Brand-new DR (existing_dr is None): insert path runs, force_status
+        # is called only once at the end (final ACTIVE/FAILED).
+        dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        dr.get.side_effect = [None, {"dr_id": "DR-1042", "status": "ACTIVE"}]
+        # On a brand-new DR there are no v1 rows to scan for orphans.
+        obj.list_by_dr_id.return_value = []
+        result = provision_dr(_cfg(), _manifest(),
+                              db_client=_mock_db(), dr_repo=dr, obj_repo=obj,
+                              access_repo=acc, audit_repo=aud, force_replace=True)
+        assert result.final_status == "ACTIVE"
+        dr.insert.assert_called_once()
+        # No pre-run force_status -- only the post-run one.
+        statuses = [c.kwargs["new_status"].value for c in dr.force_status.call_args_list]
+        assert statuses == ["ACTIVE"]
+
+    def test_reprovision_drops_v1_orphans(self) -> None:
+        # v1 had a row for prod_analytics_p.customers.churn_scores cloned
+        # into prod_analytics_n.dr_1042_customers.churn_scores.  v2's
+        # manifest (the _manifest() default) ALSO includes that target,
+        # so it stays.  But v1 had ALSO cloned prod_analytics_p.old.gone
+        # which v2 no longer mentions -- that one must be dropped from
+        # UC during the re-provision, otherwise cleanup_dr can never
+        # find it (the row gets wiped by delete_by_dr_id).
+        dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        dr.get.side_effect = [
+            {"dr_id": "DR-1042", "status": "ACTIVE"},     # existing_dr
+            {"dr_id": "DR-1042", "status": "ACTIVE"},     # post-run read-back
+        ]
+        # v1 rows: one target that v2 also has, one that v2 dropped.
+        obj.list_by_dr_id.return_value = [
+            {"dr_id": "DR-1042", "target_fqn": "prod_analytics_n.dr_1042_customers.profile",
+             "object_type": "table"},
+            {"dr_id": "DR-1042", "target_fqn": "prod_analytics_n.dr_1042_old.gone",
+             "object_type": "table"},
+            {"dr_id": "DR-1042", "target_fqn": "prod_analytics_n.dr_1042_import_main.main_volume",
+             "object_type": "volume"},
+        ]
+        db = _mock_db()
+        result = provision_dr(_cfg(), _manifest(),
+                              db_client=db, dr_repo=dr, obj_repo=obj,
+                              access_repo=acc, audit_repo=aud,
+                              force_replace=True)
+        assert result.final_status == "ACTIVE"
+
+        # The v1 orphan table must have been dropped via delete_table.
+        delete_table_calls = [c.args[0] for c in db.delete_table.call_args_list]
+        assert "prod_analytics_n.dr_1042_old.gone" in delete_table_calls
+        # The v1 volume orphan must have gone through DROP VOLUME SQL.
+        sql_exec_calls = [c.args[0] for c in db.sql_exec.call_args_list]
+        assert any(
+            "DROP VOLUME IF EXISTS prod_analytics_n.dr_1042_import_main.main_volume" in s
+            for s in sql_exec_calls
+        )
+        # The v1 target that v2 still has must NOT have been pre-dropped --
+        # CREATE OR REPLACE handles it during the clone pass.
+        assert "prod_analytics_n.dr_1042_customers.profile" not in delete_table_calls
 
     def test_readback_mismatch_logs_critical(self, caplog) -> None:
         # Simulate the case where force_status "succeeds" (no exception) but

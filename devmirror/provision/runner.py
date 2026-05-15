@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from devmirror.control.control_table import DRStatus, ObjectStatus
-from devmirror.provision.access_manager import apply_grants
+from devmirror.provision.access_manager import apply_grants, apply_volume_grants
 from devmirror.provision.object_cloner import (
     CloneResult,
     default_clone_strategy,
@@ -17,6 +17,7 @@ from devmirror.provision.object_cloner import (
 )
 from devmirror.utils import now_iso, revision_values, run_bounded
 from devmirror.utils.naming import (
+    import_schema_fqn,
     required_target_schemas,
     resolve_target_catalog,
     target_object_fqn,
@@ -131,6 +132,94 @@ def _get_schemas_for_env(
     return sorted(set(all_target_schemas))
 
 
+def _import_schema_suffix() -> str:
+    """Configured suffix for the per-DR import schema; '' means feature off."""
+    import os
+    return os.environ.get("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "").strip()
+
+
+def _import_volume_name() -> str:
+    """Configured volume name for the import schema; '' means no volume."""
+    import os
+    return os.environ.get("DEVMIRROR_IMPORT_VOLUME_NAME", "").strip()
+
+
+def _source_catalogs_from_manifest(manifest: dict[str, Any]) -> set[str]:
+    """Distinct source catalogs (parts[0] of each 3-part object FQN)."""
+    cats: set[str] = set()
+    for obj in manifest.get("scan_result", {}).get("objects", []):
+        parts = (obj.get("fqn") or "").split(".")
+        if len(parts) == 3 and parts[0]:
+            cats.add(parts[0])
+    return cats
+
+
+def _get_import_schemas_for_env(
+    manifest: dict[str, Any], dr_id: str, env: str,
+) -> list[str]:
+    """Return import-schema FQNs (one per source catalog), or [] if feature off.
+
+    Each DR provision creates one of these schemas per (env, source-catalog)
+    pair so the customer has a known location for sideloaded artifacts.
+    Activated only when ``DEVMIRROR_IMPORT_SCHEMA_SUFFIX`` is set.
+    """
+    suffix = _import_schema_suffix()
+    if not suffix:
+        return []
+    schemas: list[str] = []
+    for source_cat in sorted(_source_catalogs_from_manifest(manifest)):
+        target_cat = resolve_target_catalog(source_cat, env)
+        schemas.append(import_schema_fqn(target_cat, dr_id, env, suffix))
+    return sorted(set(schemas))
+
+
+def _get_import_volume_rows_for_env(
+    config: DevMirrorConfig, manifest: dict[str, Any], env: str,
+) -> list[dict[str, Any]]:
+    """Build ``dr_objects`` rows for the per-import-schema managed Volume.
+
+    Tracking volumes as object rows piggybacks on the existing clone and
+    cleanup machinery: ``execute_clone`` with strategy ``create_volume``
+    runs the DDL; ``_collect_schemas_from_objects`` discovers the import
+    schema for the cleanup-time DROP; the schema CASCADE removes the
+    volume even if the row-level DROP VOLUME is skipped.
+
+    Returns [] when ``DEVMIRROR_IMPORT_SCHEMA_SUFFIX`` or
+    ``DEVMIRROR_IMPORT_VOLUME_NAME`` is unset.
+    """
+    suffix = _import_schema_suffix()
+    volume = _import_volume_name()
+    if not suffix or not volume:
+        return []
+    dr = config.development_request
+    data_revision = dr.data_revision
+    rows: list[dict[str, Any]] = []
+    for source_cat in sorted(_source_catalogs_from_manifest(manifest)):
+        target_cat = resolve_target_catalog(source_cat, env)
+        schema_fqn = import_schema_fqn(target_cat, dr.dr_id, env, suffix)
+        volume_fqn = f"{schema_fqn}.{volume}"
+        rows.append({
+            "dr_id": dr.dr_id,
+            # source_fqn is empty -- a volume is not a clone of anything.
+            # Storing the source catalog here helps audit/debugging without
+            # breaking downstream FQN-shape checks (they only fire on the
+            # clone path, which short-circuits for create_volume).
+            "source_fqn": source_cat,
+            "target_fqn": volume_fqn,
+            "target_environment": env,
+            "object_type": "volume",
+            "access_mode": "READ_WRITE",
+            "clone_strategy": "create_volume",
+            "clone_revision_mode": data_revision.mode,
+            "clone_revision_value": revision_values(data_revision)[1],
+            "provisioned_at": None,
+            "last_refreshed_at": None,
+            "status": ObjectStatus.REFRESH_PENDING.value,
+            "estimated_size_gb": None,
+        })
+    return rows
+
+
 class SchemaCollisionError(Exception):
     """Raised when an active DR already occupies the same schema prefix."""
 
@@ -173,13 +262,15 @@ def provision_dr(
                     f"(or --auto-approve) to proceed."
                 )
 
-    # Insert DR record (or, if it already exists, normalise its status to
-    # PROVISIONING so the post-work CAS update can find it).  Without this,
-    # a re-provision of a previously FAILED DR would silently no-op its
-    # final status update -- the row would stay at FAILED even after every
-    # object successfully cloned.
-    inserted = False
-    try:
+    # Insert OR upsert the DR row.  Delta tables don't enforce PK
+    # uniqueness, so the prior "try INSERT, swallow on duplicate" pattern
+    # silently created duplicate rows on every re-provision (the INSERT
+    # never raised).  Gate the INSERT on existing_dr is None and rely on
+    # force_status for the existing-row path -- both branches end with the
+    # row at PROVISIONING, exactly one row per dr_id.
+    if existing_dr is None:
+        # Truly a new DR.  We don't catch here -- a real INSERT failure
+        # (network, schema mismatch, etc.) is fatal and should surface.
         dr_repo.insert(
             db_client,
             dr_id=dr_id,
@@ -191,18 +282,12 @@ def provision_dr(
             expiration_date=dr.lifecycle.expiration_date.isoformat(),
             last_modified_at=now,
         )
-        inserted = True
-    except Exception:
-        logger.debug("DR insert may have failed (possibly already exists), continuing")
-
-    if not inserted and existing_dr is not None:
-        # Row exists -- normalise to PROVISIONING before any work runs.  We
-        # use force_status (no CAS gate) because the previous CAS-based
-        # approach silently no-op'd whenever the live row's status didn't
-        # match the value cached in existing_dr (e.g. a row stuck at FAILED
-        # from a prior crashed run).  The runner is the authoritative
-        # writer for this DR thanks to TaskTracker single-flighting, so
-        # losing the CAS check is safe.
+    else:
+        # Re-provision: row exists, normalise to PROVISIONING.  Uses
+        # force_status (no CAS gate) because TaskTracker single-flights
+        # this DR, so we are the authoritative writer.  CAS would silently
+        # no-op if the live row's status didn't match the value cached in
+        # existing_dr (e.g. a row stuck at FAILED from a prior crashed run).
         try:
             dr_repo.force_status(
                 db_client,
@@ -238,8 +323,20 @@ def provision_dr(
 
     for env in envs:
         schemas = _get_schemas_for_env(config, manifest, env)
+        # Per-DR import schemas (one per source catalog) for sideloaded
+        # artifacts -- merged into the same provision_schemas call so
+        # they're created in lockstep with the regular clone targets.
+        # Skipped when DEVMIRROR_IMPORT_SCHEMA_SUFFIX is unset.
+        schemas = sorted(set(
+            schemas + _get_import_schemas_for_env(manifest, dr_id, env),
+        ))
         all_schemas.extend(schemas)
+
         obj_rows = _build_object_rows(config, manifest, env)
+        # Volume rows piggyback on the object-row pipeline so cleanup,
+        # status tracking, and audit logs all work uniformly.  Skipped
+        # when DEVMIRROR_IMPORT_VOLUME_NAME is unset.
+        obj_rows += _get_import_volume_rows_for_env(config, manifest, env)
         all_object_rows.extend(obj_rows)
 
     # Validate Delta retention window
@@ -262,8 +359,71 @@ def provision_dr(
             list(schema_result.failed.keys()),
         )
 
-    # Clear stale object rows from previous provision attempts
+    # On re-provision, drop v1 physical UC objects whose target FQN
+    # isn't in v2's plan before wiping the metadata rows.  Without this,
+    # any v1 target dropped from v2 (because the user removed a source
+    # table, switched catalogs, etc.) becomes a permanent orphan in UC
+    # -- the next cleanup_dr has no dr_objects row to find it.
+    #
+    # Targets that ARE in v2 are skipped here because the clone DDL
+    # uses CREATE OR REPLACE and will overwrite them in the clone pass.
     if force_replace:
+        try:
+            old_rows = obj_repo.list_by_dr_id(db_client, dr_id=dr_id)
+        except Exception:
+            logger.debug("Failed to read v1 object rows for orphan drop", exc_info=True)
+            old_rows = []
+
+        new_target_fqns = {row["target_fqn"] for row in all_object_rows}
+        old_schemas: set[str] = set()
+        for row in old_rows:
+            old_target = row.get("target_fqn", "")
+            if not old_target:
+                continue
+            parts = old_target.split(".")
+            if len(parts) >= 2:
+                old_schemas.add(f"{parts[0]}.{parts[1]}")
+            if old_target in new_target_fqns:
+                # v2 re-creates this target -- CREATE OR REPLACE handles it.
+                continue
+            try:
+                if row.get("object_type") == "volume":
+                    db_client.sql_exec(f"DROP VOLUME IF EXISTS {old_target}")
+                else:
+                    db_client.delete_table(old_target)
+                logger.info(
+                    "Dropped v1 orphan %s during re-provision of %s",
+                    old_target, dr_id,
+                )
+            except Exception as exc:
+                # Non-fatal -- log and continue.  Cleanup will retry at
+                # DR expiration, but a manual drop may be needed if the
+                # orphan persists past that point.
+                logger.warning(
+                    "Failed to drop v1 orphan %s during re-provision of %s: %s",
+                    old_target, dr_id, exc,
+                )
+
+        # Drop v1 schemas that v2 no longer references.  v2-recreated
+        # schemas were already CREATE SCHEMA IF NOT EXISTS'd above and
+        # need to stay.
+        new_schemas_set = set(all_schemas)
+        for old_schema in sorted(old_schemas - new_schemas_set):
+            parts = old_schema.split(".")
+            if len(parts) != 2:
+                continue
+            try:
+                db_client.delete_schema(parts[0], parts[1])
+                logger.info(
+                    "Dropped v1 orphan schema %s during re-provision of %s",
+                    old_schema, dr_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to drop v1 orphan schema %s during re-provision of %s: %s",
+                    old_schema, dr_id, exc,
+                )
+
         try:
             obj_repo.delete_by_dr_id(db_client, dr_id=dr_id)
         except Exception:
@@ -334,25 +494,88 @@ def provision_dr(
             except Exception:
                 logger.debug("Status update to FAILED failed, non-fatal")
 
-    # Grant access -- skip if no schemas were created for this environment
-    # (otherwise apply_grants would still validate principals and produce
-    # spurious "principal not found" entries).
+    # Grant matrix:
+    #   - Developers get RW on EVERY env (dev and qa).  They need to be
+    #     able to fix what QA users find.
+    #   - QA users get READ-only on the QA env.
+    #   - If the same principal appears in both lists, RW wins
+    #     (developer pass runs first; granting RO on top is idempotent
+    #     in UC but produces audit noise -- so we dedupe by skipping
+    #     such principals in the QA-user pass).
+    # Skip the whole pass when no schemas were created for an env --
+    # apply_grants would still validate principals and produce spurious
+    # "principal not found" entries.
+    dev_emails = {d.lower() for d in (dr.access.developers or [])}
+    qa_only_users = [
+        u for u in (dr.access.qa_users or [])
+        if u.lower() not in dev_emails
+    ]
+
     dev_schemas = _get_schemas_for_env(config, manifest, "dev")
-    if dev_schemas:
-        dev_principals = list(dr.access.developers)
-        grant_result = apply_grants(db_client, dev_schemas, dev_principals)
+    if dev_schemas and dr.access.developers:
+        grant_result = apply_grants(
+            db_client, dev_schemas, list(dr.access.developers), writable=True,
+        )
         result.grants_applied += grant_result.granted
         result.grants_failed.extend(grant_result.failed)
 
-    if "qa" in envs and dr.access.qa_users:
+    if "qa" in envs:
         qa_schemas = _get_schemas_for_env(config, manifest, "qa")
         if qa_schemas:
-            qa_principals = list(dr.access.qa_users)
-            qa_grant_result = apply_grants(db_client, qa_schemas, qa_principals)
-            result.grants_applied += qa_grant_result.granted
-            result.grants_failed.extend(qa_grant_result.failed)
+            if dr.access.developers:
+                dev_qa_result = apply_grants(
+                    db_client, qa_schemas, list(dr.access.developers),
+                    writable=True,
+                )
+                result.grants_applied += dev_qa_result.granted
+                result.grants_failed.extend(dev_qa_result.failed)
+            if qa_only_users:
+                qa_grant_result = apply_grants(
+                    db_client, qa_schemas, qa_only_users, writable=False,
+                )
+                result.grants_applied += qa_grant_result.granted
+                result.grants_failed.extend(qa_grant_result.failed)
 
-    # Record access rows
+    # Per-volume grants for the per-DR import-schema Volumes.  Schema-level
+    # USE_SCHEMA was already granted above as part of `apply_grants` on
+    # the import schemas -- this just adds the volume-securable grants
+    # on top.  Same matrix as schema grants.
+    dev_volumes = [
+        row["target_fqn"] for row in all_object_rows
+        if row.get("object_type") == "volume"
+        and row.get("target_environment") == "dev"
+    ]
+    if dev_volumes and dr.access.developers:
+        vol_grant_result = apply_volume_grants(
+            db_client, dev_volumes, list(dr.access.developers), writable=True,
+        )
+        result.grants_applied += vol_grant_result.granted
+        result.grants_failed.extend(vol_grant_result.failed)
+
+    qa_volumes = [
+        row["target_fqn"] for row in all_object_rows
+        if row.get("object_type") == "volume"
+        and row.get("target_environment") == "qa"
+    ]
+    if qa_volumes:
+        if dr.access.developers:
+            dev_qa_vol = apply_volume_grants(
+                db_client, qa_volumes, list(dr.access.developers), writable=True,
+            )
+            result.grants_applied += dev_qa_vol.granted
+            result.grants_failed.extend(dev_qa_vol.failed)
+        if qa_only_users:
+            qa_vol_grant_result = apply_volume_grants(
+                db_client, qa_volumes, qa_only_users, writable=False,
+            )
+            result.grants_applied += qa_vol_grant_result.granted
+            result.grants_failed.extend(qa_vol_grant_result.failed)
+
+    # Record access rows -- one row per (principal, environment), with the
+    # access_level reflecting the effective UC grant.  Developers get
+    # READ_WRITE rows in both dev and qa envs (when qa is enabled);
+    # qa-only-users get READ_ONLY rows in qa.  Principals that are in
+    # both lists collapse to a single READ_WRITE row in qa (no duplicate).
     access_rows: list[dict[str, str]] = []
     for dev in dr.access.developers:
         access_rows.append({
@@ -362,13 +585,21 @@ def provision_dr(
             "access_level": "READ_WRITE",
             "granted_at": now_iso(),
         })
-    if "qa" in envs and dr.access.qa_users:
-        for qa_user in dr.access.qa_users:
+    if "qa" in envs:
+        for dev in dr.access.developers:
+            access_rows.append({
+                "dr_id": dr_id,
+                "user_email": dev,
+                "environment": "qa",
+                "access_level": "READ_WRITE",
+                "granted_at": now_iso(),
+            })
+        for qa_user in qa_only_users:
             access_rows.append({
                 "dr_id": dr_id,
                 "user_email": qa_user,
                 "environment": "qa",
-                "access_level": "READ_WRITE",
+                "access_level": "READ_ONLY",
                 "granted_at": now_iso(),
             })
 

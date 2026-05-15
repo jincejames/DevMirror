@@ -12,6 +12,7 @@ from devmirror.provision.access_manager import (
     _validate_principal,
     apply_grants,
     apply_revokes,
+    apply_volume_grants,
     generate_grant_statements,
     grant_schema_rw_sql,
     grant_schema_usage_sql,
@@ -235,6 +236,81 @@ class TestApplyGrants:
         # No actual grant calls should have been made.
         db.grant.assert_not_called()
 
+    def test_writable_true_includes_modify(self) -> None:
+        """writable=True (default) keeps RW behavior: USE_SCHEMA + SELECT,MODIFY."""
+        from databricks.sdk.service.catalog import Privilege
+
+        db = _mock_db()
+        apply_grants(db, ["a.b"], ["dev@co.com"], writable=True)
+        # Two grant calls -- USE_SCHEMA then SELECT+MODIFY.
+        priv_sets = [set(c.args[3]) for c in db.grant.call_args_list]
+        assert {Privilege.USE_SCHEMA} in priv_sets
+        assert any(Privilege.MODIFY in s and Privilege.SELECT in s for s in priv_sets)
+
+    def test_writable_false_omits_modify(self) -> None:
+        """writable=False grants USE_SCHEMA + SELECT only, NOT MODIFY."""
+        from databricks.sdk.service.catalog import Privilege
+
+        db = _mock_db()
+        apply_grants(db, ["a.b"], ["qa@co.com"], writable=False)
+        priv_sets = [set(c.args[3]) for c in db.grant.call_args_list]
+        # Every grant call must NOT contain MODIFY.
+        for s in priv_sets:
+            assert Privilege.MODIFY not in s
+        # SELECT must still be granted.
+        assert any(Privilege.SELECT in s for s in priv_sets)
+        # USE_SCHEMA still granted.
+        assert {Privilege.USE_SCHEMA} in priv_sets
+
+    def test_writable_default_is_true(self) -> None:
+        """Backwards compat: calling apply_grants() without the kwarg keeps RW."""
+        from databricks.sdk.service.catalog import Privilege
+
+        db = _mock_db()
+        apply_grants(db, ["a.b"], ["dev@co.com"])
+        priv_sets = [set(c.args[3]) for c in db.grant.call_args_list]
+        assert any(Privilege.MODIFY in s for s in priv_sets)
+
+    def test_scim_check_bypass_skips_existence_check(
+        self, monkeypatch,
+    ) -> None:
+        """LH-style workspace where SP can't read SCIM: env var bypass
+        must skip the filter-list rejection so grants actually fire."""
+        monkeypatch.setenv("DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK", "true")
+
+        db = _mock_db()
+        # Make SCIM return empty -- without the bypass this would
+        # reject the principal as "not found".
+        db.client.users.list.return_value = []
+        db.client.groups.list.return_value = []
+
+        result = apply_grants(db, ["cat.s"], ["dev@dlh.de"])
+        # Grants must have been attempted (2 calls per principal:
+        # USE_SCHEMA + RW), not blocked by SCIM pre-check.
+        assert result.granted == 2
+        assert result.failed == []
+        # And users.list must NOT have been called at all -- the bypass
+        # short-circuits before SCIM.
+        db.client.users.list.assert_not_called()
+
+    def test_scim_bypass_off_when_env_unset(self, monkeypatch) -> None:
+        """Default (env var unset/false): SCIM check fires normally."""
+        monkeypatch.delenv("DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK", raising=False)
+        db = _mock_db()
+        db.client.users.list.return_value = []
+        db.client.groups.list.return_value = []
+        result = apply_grants(db, ["cat.s"], ["ghost@co.com"])
+        assert not result.all_succeeded
+        assert result.granted == 0  # SCIM rejected, no grants attempted
+
+    def test_scim_bypass_off_when_env_false(self, monkeypatch) -> None:
+        monkeypatch.setenv("DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK", "false")
+        db = _mock_db()
+        db.client.users.list.return_value = []
+        db.client.groups.list.return_value = []
+        result = apply_grants(db, ["cat.s"], ["ghost@co.com"])
+        assert result.granted == 0
+
 
 # ===================================================================
 # apply_revokes (now uses SDK revoke API)
@@ -273,3 +349,91 @@ class TestAccessGrantResult:
     def test_all_succeeded_false(self) -> None:
         result = AccessGrantResult(granted=1, failed=[("sql", "err")])
         assert not result.all_succeeded
+
+
+# ===================================================================
+# apply_volume_grants -- per-volume READ_VOLUME / WRITE_VOLUME
+# ===================================================================
+
+
+class TestApplyVolumeGrants:
+    """Volumes need their own securable-level grants on top of the
+    schema-level USE_SCHEMA that apply_grants installs.  Developers get
+    RW (READ + WRITE); QA users get R-only."""
+
+    def test_writable_grants_read_and_write(self) -> None:
+        from databricks.sdk.service.catalog import Privilege, SecurableType
+
+        db = _mock_db()
+        result = apply_volume_grants(
+            db,
+            ["cat.dr_1_import_main.main_volume"],
+            ["dev@co.com"],
+            writable=True,
+        )
+        assert result.all_succeeded and result.granted == 1
+        call = db.grant.call_args
+        assert call.args[0] == SecurableType.VOLUME
+        assert call.args[1] == "cat.dr_1_import_main.main_volume"
+        assert call.args[2] == "dev@co.com"
+        privileges = call.args[3]
+        assert Privilege.READ_VOLUME in privileges
+        assert Privilege.WRITE_VOLUME in privileges
+
+    def test_readonly_grants_only_read(self) -> None:
+        from databricks.sdk.service.catalog import Privilege
+
+        db = _mock_db()
+        apply_volume_grants(
+            db, ["cat.qa_1_import_main.main_volume"], ["qa@co.com"], writable=False,
+        )
+        privileges = db.grant.call_args.args[3]
+        assert privileges == [Privilege.READ_VOLUME]
+
+    def test_multiple_volumes_and_principals(self) -> None:
+        db = _mock_db()
+        result = apply_volume_grants(
+            db,
+            ["cat.dr_1_import_main.main_volume", "cat2.dr_1_import_main.main_volume"],
+            ["dev1@co.com", "dev2@co.com"],
+            writable=True,
+        )
+        # 2 volumes * 2 principals = 4 grant calls
+        assert result.granted == 4
+        assert db.grant.call_count == 4
+
+    def test_empty_inputs_no_grants(self) -> None:
+        db = _mock_db()
+        result = apply_volume_grants(db, [], ["dev@co.com"], writable=True)
+        assert result.granted == 0
+        db.grant.assert_not_called()
+        result = apply_volume_grants(db, ["cat.s.v"], [], writable=True)
+        assert result.granted == 0
+        db.grant.assert_not_called()
+
+    def test_invalid_principal_short_circuits_with_failure(self) -> None:
+        db = _mock_db()
+        # Empty SCIM result -> principal "doesn't exist".
+        db.client.users.list.return_value = []
+        db.client.groups.list.return_value = []
+        result = apply_volume_grants(
+            db, ["cat.dr_1_import_main.main_volume"], ["ghost@co.com"], writable=True,
+        )
+        assert not result.all_succeeded
+        assert any("not found" in msg for _, msg in result.failed)
+        db.grant.assert_not_called()
+
+    def test_invalid_volume_fqn_rejected(self) -> None:
+        db = _mock_db()
+        # Two-part FQN -- not a volume.
+        with pytest.raises(AccessManagerError, match="three-part"):
+            apply_volume_grants(db, ["cat.schema"], ["dev@co.com"], writable=True)
+
+    def test_grant_failure_recorded(self) -> None:
+        db = _mock_db()
+        db.grant.side_effect = Exception("permission denied")
+        result = apply_volume_grants(
+            db, ["cat.dr_1_import_main.main_volume"], ["dev@co.com"], writable=True,
+        )
+        assert not result.all_succeeded
+        assert "permission denied" in result.failed[0][1]

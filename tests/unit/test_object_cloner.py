@@ -8,6 +8,7 @@ import pytest
 
 from devmirror.config.schema import DataRevision
 from devmirror.provision.object_cloner import (
+    IMPORT_VOLUME_SUBDIRS,
     ClonerError,
     SchemaProvisioningError,
     SchemaProvisionResult,
@@ -16,10 +17,12 @@ from devmirror.provision.object_cloner import (
     create_schema_sql,
     create_shallow_clone_sql,
     create_view_sql,
+    create_volume_sql,
     default_clone_strategy,
     execute_clone,
     generate_clone_sql,
     provision_schemas,
+    provision_volume_subdirs,
 )
 
 # ------------------------------------------------------------------
@@ -43,11 +46,23 @@ class TestCloneSql:
     @pytest.mark.parametrize("fn,keyword", [
         (create_shallow_clone_sql, "SHALLOW CLONE"),
         (create_deep_clone_sql, "DEEP CLONE"),
-        (create_view_sql, "CREATE VIEW"),
+        (create_view_sql, "CREATE OR REPLACE VIEW"),
         (create_schema_only_sql, "LIKE"),
     ])
     def test_basic(self, fn, keyword) -> None:
         assert keyword in fn(_SRC, _TGT)
+
+    @pytest.mark.parametrize("fn", [
+        create_shallow_clone_sql,
+        create_deep_clone_sql,
+        create_view_sql,
+    ])
+    def test_uses_create_or_replace(self, fn) -> None:
+        # Idempotent re-provision: re-cloning the same target_fqn must
+        # overwrite, not fail with "object exists".  Without this, a
+        # re-provision of an unchanged DR breaks because the v1 clone
+        # is still in UC.
+        assert "CREATE OR REPLACE" in fn(_SRC, _TGT)
 
     @pytest.mark.parametrize("fn", [create_shallow_clone_sql, create_deep_clone_sql, create_view_sql])
     def test_version_revision(self, fn) -> None:
@@ -73,7 +88,8 @@ class TestCloneSql:
 class TestGenerateCloneSql:
     @pytest.mark.parametrize("strategy,keyword", [
         ("shallow_clone", "SHALLOW CLONE"), ("deep_clone", "DEEP CLONE"),
-        ("view", "CREATE VIEW"), ("schema_only", "LIKE"),
+        ("view", "CREATE OR REPLACE VIEW"), ("schema_only", "LIKE"),
+        ("create_volume", "CREATE VOLUME"),
     ])
     def test_dispatches(self, strategy, keyword) -> None:
         assert keyword in generate_clone_sql("a.b.c", "d.e.f", strategy)
@@ -81,6 +97,20 @@ class TestGenerateCloneSql:
     def test_invalid_strategy(self) -> None:
         with pytest.raises(ClonerError, match="Unknown"):
             generate_clone_sql("a.b.c", "d.e.f", "bad")
+
+
+class TestCreateVolumeSql:
+    def test_basic(self) -> None:
+        sql = create_volume_sql("cat.schema.main_volume")
+        assert sql == "CREATE VOLUME IF NOT EXISTS cat.schema.main_volume"
+
+    def test_rejects_invalid_fqn(self) -> None:
+        with pytest.raises(ClonerError, match="three-part"):
+            create_volume_sql("two.parts")
+
+    def test_rejects_unsafe_chars(self) -> None:
+        with pytest.raises(ClonerError, match="Unsafe"):
+            create_volume_sql("cat.schema.v;DROP")
 
 
 # ------------------------------------------------------------------
@@ -105,6 +135,53 @@ class TestExecuteClone:
     def test_with_revision(self) -> None:
         r = execute_clone(_mock_db(), "a.b.c", "d.e.f", "shallow_clone", _REV_V)
         assert "VERSION AS OF 42" in r.sql
+
+
+# ------------------------------------------------------------------
+# provision_volume_subdirs
+# ------------------------------------------------------------------
+
+
+class TestProvisionVolumeSubdirs:
+    def test_creates_full_tree(self) -> None:
+        db = _mock_db()
+        created = provision_volume_subdirs(db, "cat.sch.main_volume")
+        paths = [c.kwargs["directory_path"] for c in
+                 db.client.files.create_directory.call_args_list]
+        assert paths == [
+            "/Volumes/cat/sch/main_volume/source",
+            "/Volumes/cat/sch/main_volume/source/data",
+            "/Volumes/cat/sch/main_volume/source/archive",
+            "/Volumes/cat/sch/main_volume/source/ready",
+        ]
+        assert created == paths
+
+    def test_continues_after_individual_failure(self) -> None:
+        db = _mock_db()
+        # Fail on the second call only; others should still be attempted.
+        db.client.files.create_directory.side_effect = [
+            None, Exception("perm denied"), None, None,
+        ]
+        created = provision_volume_subdirs(db, "cat.sch.main_volume")
+        assert db.client.files.create_directory.call_count == 4
+        assert "/Volumes/cat/sch/main_volume/source/data" not in created
+        assert "/Volumes/cat/sch/main_volume/source/archive" in created
+
+    def test_execute_clone_carves_subdirs_on_create_volume(self) -> None:
+        db = _mock_db()
+        r = execute_clone(db, "ignored.src.fqn", "cat.sch.main_volume",
+                          "create_volume")
+        assert r.success
+        # CREATE VOLUME SQL + 4 directory creates.
+        assert db.sql_exec.call_count == 1
+        assert db.client.files.create_directory.call_count == len(
+            IMPORT_VOLUME_SUBDIRS
+        )
+
+    def test_execute_clone_skips_subdirs_for_non_volume_strategy(self) -> None:
+        db = _mock_db()
+        execute_clone(db, "a.b.c", "d.e.f", "shallow_clone")
+        db.client.files.create_directory.assert_not_called()
 
 
 # ------------------------------------------------------------------

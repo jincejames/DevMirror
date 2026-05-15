@@ -428,6 +428,7 @@ def export_config_yaml(
 # ---- 8. GET /api/streams/search (searchStreams) --------------------------
 
 _SEARCH_RESULT_CAP = 20
+_MAX_JOBS_SCANNED = 2000
 
 
 def _search_one_workspace(ws_client, q: str, workspace_label: str, cap: int) -> list[StreamSearchResult]:
@@ -436,15 +437,26 @@ def _search_one_workspace(ws_client, q: str, workspace_label: str, cap: int) -> 
     Errors are caught and logged at WARNING; partial results are returned.
     """
     out: list[StreamSearchResult] = []
+    # The Databricks Jobs 2.2 list API only supports exact (case-insensitive)
+    # name match via the ``name`` query parameter -- it has no LIKE / contains
+    # filter.  To support prefix and substring search we iterate without a
+    # server-side filter and match client-side, capping the scan at
+    # _MAX_JOBS_SCANNED so a workspace with tens of thousands of jobs cannot
+    # turn one keystroke into a full enumeration.
+    q_lower = q.lower()
     try:
-        for job in ws_client.jobs.list(name=q):
+        scanned = 0
+        for job in ws_client.jobs.list(limit=100):
+            scanned += 1
+            if scanned > _MAX_JOBS_SCANNED:
+                break
             job_name = getattr(job.settings, "name", None) if job.settings else None
-            if job_name:
+            if job_name and q_lower in job_name.lower():
                 out.append(
                     StreamSearchResult(name=job_name, type="job", workspace=workspace_label),
                 )
-            if len(out) >= cap:
-                return out
+                if len(out) >= cap:
+                    return out
     except Exception:
         logger.warning("Failed to search jobs in workspace %r", workspace_label, exc_info=True)
 
@@ -502,29 +514,93 @@ def search_streams(
     except Exception:
         logger.warning("Failed to search local workspace", exc_info=True)
 
-    # 2. Optional remote workspace -- gated on env vars.
+    # 2. Optional remote workspace -- gated on env vars.  Auth method is
+    # auto-detected from which credentials are configured (OAuth M2M
+    # preferred when both CLIENT_ID + CLIENT_SECRET are set, useful for
+    # workspaces that disable PATs by policy; PAT fallback for others).
     remote_host = _os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_HOST", "").strip()
-    remote_token = _os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_TOKEN", "").strip()
-    if (
-        remote_host
-        and remote_token
-        and len(results) < _SEARCH_RESULT_CAP
-    ):
+    if remote_host and len(results) < _SEARCH_RESULT_CAP:
         remote_label = (
             _os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_LABEL", "").strip()
             or remote_host
         )
         try:
-            remote_ws = WorkspaceClient(
-                host=remote_host, token=remote_token, auth_type="pat",
-            )
-            remote_cap = _SEARCH_RESULT_CAP - len(results)
-            results.extend(
-                _search_one_workspace(remote_ws, q, remote_label, remote_cap),
-            )
+            remote_ws = _build_remote_workspace_client(remote_host)
+            if remote_ws is None:
+                logger.warning(
+                    "Remote workspace %r configured (host=%s) but no auth "
+                    "credentials -- set CLIENT_ID+CLIENT_SECRET (oauth-m2m) "
+                    "or TOKEN (pat).  Skipping remote search.",
+                    remote_label, remote_host,
+                )
+            else:
+                remote_cap = _SEARCH_RESULT_CAP - len(results)
+                results.extend(
+                    _search_one_workspace(remote_ws, q, remote_label, remote_cap),
+                )
         except Exception:
             logger.warning(
                 "Failed to search remote workspace %r", remote_label, exc_info=True,
             )
 
     return StreamSearchResponse(results=results[:_SEARCH_RESULT_CAP])
+
+
+def _build_remote_workspace_client(host: str):
+    """Construct a ``WorkspaceClient`` for the configured remote workspace.
+
+    Auth-method dispatch (in precedence order):
+
+    1. **OAuth M2M with the app's own SP** when ``DATABRICKS_CLIENT_ID``
+       AND ``DATABRICKS_CLIENT_SECRET`` are both set (the Apps runtime
+       auto-injects these for the app's auto-provisioned SP).  These
+       are *account-level* credentials and are valid against any
+       workspace the SP is assigned to from the account console, so
+       reusing them is the canonical way to do cross-workspace API
+       calls -- no separate secret needs to be minted or stored.
+
+    2. **OAuth M2M override** when ``DEVMIRROR_REMOTE_WORKSPACE_CLIENT_ID``
+       AND ``DEVMIRROR_REMOTE_WORKSPACE_CLIENT_SECRET`` are set (and the
+       auto-injected pair above is not).  Use this only when a
+       *different* SP must talk to the remote workspace.
+
+    3. **PAT** when ``DEVMIRROR_REMOTE_WORKSPACE_TOKEN`` is non-empty
+       (and neither OAuth pair is).  Legacy mode for workspaces that
+       permit PATs.
+
+    4. Returns ``None`` when nothing is configured -- caller logs and
+       skips the remote search rather than crashing.
+    """
+    import os
+    # Path 1: app's own auto-injected account-level OAuth creds.
+    client_id = os.environ.get("DATABRICKS_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "").strip()
+    # Path 2: explicit override (different SP / pre-minted secret).
+    if not (client_id and client_secret):
+        client_id = os.environ.get(
+            "DEVMIRROR_REMOTE_WORKSPACE_CLIENT_ID", "",
+        ).strip()
+        client_secret = os.environ.get(
+            "DEVMIRROR_REMOTE_WORKSPACE_CLIENT_SECRET", "",
+        ).strip()
+    if client_id and client_secret:
+        from databricks.sdk.config import Config
+        # workspace_id is supplied as an explicit config parameter
+        # (DEVMIRROR_REMOTE_WORKSPACE_ID) so the SDK Config carries the
+        # REMOTE workspace ID rather than the auto-injected
+        # DATABRICKS_WORKSPACE_ID (= local SUPPORT workspace).
+        workspace_id = os.environ.get(
+            "DEVMIRROR_REMOTE_WORKSPACE_ID", "",
+        ).strip()
+        cfg = Config(
+            host=host,
+            client_id=client_id,
+            client_secret=client_secret,
+            auth_type="oauth-m2m",
+            workspace_id=workspace_id,
+        )
+        return WorkspaceClient(config=cfg)
+    token = os.environ.get("DEVMIRROR_REMOTE_WORKSPACE_TOKEN", "").strip()
+    if token:
+        return WorkspaceClient(host=host, token=token, auth_type="pat")
+    return None

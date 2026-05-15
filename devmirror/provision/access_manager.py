@@ -32,6 +32,25 @@ class PrincipalNotFoundError(Exception):
     """Raised when a principal can't be resolved in the workspace SCIM directory."""
 
 
+def _scim_check_bypassed() -> bool:
+    """Return True when ``DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK`` is truthy.
+
+    Workspaces where the app SP can't list arbitrary users via SCIM
+    (LH/Azure: the SP only sees members of its own groups) need this
+    escape hatch -- otherwise every developer/qa_user filter-list comes
+    back empty and `_principal_exists` rejects them, dropping ALL
+    grants silently.  When the check is bypassed, principals are
+    trusted; UC's grants API still rejects genuinely non-existent
+    principals at grant-execution time with a loud error that gets
+    recorded in `grants_failed`, so we don't create orphan grants for
+    typos -- we just stop pre-filtering them.
+    """
+    import os
+    return os.environ.get(
+        "DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK", "",
+    ).strip().lower() in ("true", "1", "yes")
+
+
 def _principal_exists(principal: str, ws_client: object | None = None) -> bool:
     """Return True if the principal resolves to a user or group via SCIM.
 
@@ -39,7 +58,15 @@ def _principal_exists(principal: str, ws_client: object | None = None) -> bool:
     don't block legitimate grants on a transient lookup failure.  A real
     miss (the lookup succeeded and returned no results) is treated as
     "exists=False" and the caller raises ``PrincipalNotFoundError``.
+
+    When ``DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK`` is set this short-circuits
+    to True -- needed for workspaces where the app SP cannot read SCIM
+    for individual users (the bypass is documented in
+    `_scim_check_bypassed`).
     """
+    if _scim_check_bypassed():
+        return True
+
     now = time.time()
     with _principal_cache_lock:
         cached = _principal_cache.get(principal)
@@ -161,8 +188,18 @@ def apply_grants(
     db_client: DbClient,
     schema_fqns: list[str],
     principals: list[str],
+    *,
+    writable: bool = True,
 ) -> AccessGrantResult:
-    """Execute schema grants via the SDK grants API, capturing per-operation failures.
+    """Execute schema grants via the SDK grants API.
+
+    ``writable=True`` (default) grants ``USE_SCHEMA + SELECT + MODIFY``
+    — the read-write mode used for developers and historically for QA
+    users too.  ``writable=False`` drops ``MODIFY`` so the principal
+    can read but not mutate the schema's tables/views — used for QA
+    users under the new grant matrix (developers RW on dev+QA,
+    QA users RO on QA).  USE_SCHEMA is granted in both modes so the
+    principal can enumerate the schema at all.
 
     Each principal is verified to exist in the workspace SCIM directory
     before granting.  Non-existent principals are recorded as failures so
@@ -174,6 +211,11 @@ def apply_grants(
 
     granted = 0
     failed: list[tuple[str, str]] = []
+
+    rw_privileges = [Privilege.SELECT]
+    if writable:
+        rw_privileges.append(Privilege.MODIFY)
+    rw_label = ", ".join(p.value for p in rw_privileges)
 
     # Pre-check principals once each so we don't hammer SCIM per schema.
     ws_client = db_client.client
@@ -205,16 +247,96 @@ def apply_grants(
                 sql_repr = f"GRANT USE_SCHEMA ON SCHEMA {schema_fqn} TO `{principal}`"
                 logger.error("Grant failed: %s -- %s", sql_repr, exc)
                 failed.append((sql_repr, str(exc)))
-            # Grant SELECT, MODIFY
+            # Grant SELECT (and MODIFY if writable)
             try:
-                logger.info("Granting SELECT, MODIFY on %s to %s", schema_fqn, principal)
+                logger.info("Granting %s on %s to %s", rw_label, schema_fqn, principal)
                 db_client.grant(
                     SecurableType.SCHEMA, schema_fqn, principal,
-                    [Privilege.SELECT, Privilege.MODIFY],
+                    rw_privileges,
                 )
                 granted += 1
             except Exception as exc:
-                sql_repr = f"GRANT SELECT, MODIFY ON SCHEMA {schema_fqn} TO `{principal}`"
+                sql_repr = f"GRANT {rw_label} ON SCHEMA {schema_fqn} TO `{principal}`"
+                logger.error("Grant failed: %s -- %s", sql_repr, exc)
+                failed.append((sql_repr, str(exc)))
+
+    return AccessGrantResult(granted=granted, failed=failed)
+
+
+def _validate_volume_fqn(volume_fqn: str) -> None:
+    """Validate a three-part volume FQN (``<catalog>.<schema>.<volume>``)."""
+    parts = volume_fqn.split(".")
+    if len(parts) != 3:
+        raise AccessManagerError(
+            f"Volume FQN must be three-part (catalog.schema.volume), got: {volume_fqn!r}"
+        )
+    for part in parts:
+        if not _SAFE_IDENTIFIER.match(part):
+            raise AccessManagerError(
+                f"Unsafe identifier in volume FQN: {part!r}. "
+                "Only alphanumeric characters and underscores are allowed."
+            )
+
+
+def apply_volume_grants(
+    db_client: DbClient,
+    volume_fqns: list[str],
+    principals: list[str],
+    *,
+    writable: bool,
+) -> AccessGrantResult:
+    """Grant READ_VOLUME (and optionally WRITE_VOLUME) per (volume, principal).
+
+    Used by the import-schema feature so developers can read AND write the
+    DR's per-catalog ``main_volume`` (sideload artifacts), while QA users
+    get read-only access to the same data.  Schema-level USE_SCHEMA is
+    granted separately by ``apply_grants`` for the schema containing the
+    volume -- that grant is required for the principal to even see the
+    volume in UC.
+
+    Principal existence is verified via SCIM (reused cache from
+    ``apply_grants``) before any grant fires.  Per-grant failures are
+    captured in ``AccessGrantResult.failed`` rather than aborting the
+    whole pass.
+    """
+    from databricks.sdk.service.catalog import Privilege, SecurableType
+
+    granted = 0
+    failed: list[tuple[str, str]] = []
+
+    if not volume_fqns or not principals:
+        return AccessGrantResult(granted=granted, failed=failed)
+
+    ws_client = db_client.client
+    valid_principals: list[str] = []
+    for principal in principals:
+        _validate_principal(principal)
+        if _principal_exists(principal, ws_client=ws_client):
+            valid_principals.append(principal)
+        else:
+            msg = (
+                f"Principal {principal!r} not found in workspace SCIM directory; "
+                "refusing to grant volume access."
+            )
+            logger.error(msg)
+            failed.append((principal, msg))
+
+    privileges = [Privilege.READ_VOLUME]
+    if writable:
+        privileges.append(Privilege.WRITE_VOLUME)
+    priv_label = ", ".join(p.value for p in privileges)
+
+    for volume_fqn in volume_fqns:
+        _validate_volume_fqn(volume_fqn)
+        for principal in valid_principals:
+            try:
+                logger.info("Granting %s on VOLUME %s to %s", priv_label, volume_fqn, principal)
+                db_client.grant(
+                    SecurableType.VOLUME, volume_fqn, principal, privileges,
+                )
+                granted += 1
+            except Exception as exc:
+                sql_repr = f"GRANT {priv_label} ON VOLUME {volume_fqn} TO `{principal}`"
                 logger.error("Grant failed: %s -- %s", sql_repr, exc)
                 failed.append((sql_repr, str(exc)))
 

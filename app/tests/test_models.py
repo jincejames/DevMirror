@@ -131,3 +131,111 @@ class TestConfigInValidation:
         with pytest.raises(ValidationError) as exc_info:
             _minimal_config_in(developers=[])
         assert "developer" in str(exc_info.value).lower()
+
+
+class TestAdditionalObjectsNormalization:
+    """ConfigIn.additional_objects accepts a list[str] (UI default) OR
+    a single string with newline/comma separators (direct-API clients).
+    Whitespace is trimmed; blanks are dropped.  Keeps the input pipeline
+    flexible without forcing every caller to pre-parse.
+    """
+
+    def test_list_passes_through(self):
+        c = _minimal_config_in(
+            additional_objects=["cat.sch.t1", "cat.sch.t2"],
+        )
+        assert c.additional_objects == ["cat.sch.t1", "cat.sch.t2"]
+
+    def test_list_trims_and_drops_blanks(self):
+        c = _minimal_config_in(
+            additional_objects=["  cat.sch.t1  ", "", "  ", "cat.sch.t2"],
+        )
+        assert c.additional_objects == ["cat.sch.t1", "cat.sch.t2"]
+
+    def test_comma_separated_string(self):
+        c = _minimal_config_in(
+            additional_objects="cat.sch.t1, cat.sch.t2,cat.sch.t3",
+        )
+        assert c.additional_objects == ["cat.sch.t1", "cat.sch.t2", "cat.sch.t3"]
+
+    def test_newline_separated_string(self):
+        c = _minimal_config_in(
+            additional_objects="cat.sch.t1\ncat.sch.t2\ncat.sch.t3",
+        )
+        assert c.additional_objects == ["cat.sch.t1", "cat.sch.t2", "cat.sch.t3"]
+
+    def test_mixed_separators(self):
+        # User pasted from a SQL editor or spreadsheet -- both forms in
+        # one payload.  Repo can recover the clean list.
+        c = _minimal_config_in(
+            additional_objects=(
+                "cat.sch.t1, cat.sch.t2\n"
+                "cat.sch.t3,cat.sch.t4\n"
+                "\n"
+                "cat.sch.t5"
+            ),
+        )
+        assert c.additional_objects == [
+            "cat.sch.t1", "cat.sch.t2",
+            "cat.sch.t3", "cat.sch.t4",
+            "cat.sch.t5",
+        ]
+
+    def test_string_with_only_blanks_treated_as_empty(self):
+        # All-whitespace string -> [] -> rejected by the streams-or-
+        # additional-objects model validator (when streams is also empty).
+        c = _minimal_config_in(additional_objects="   \n\n  , , ")
+        assert c.additional_objects == []
+
+    def test_none_passes_through(self):
+        c = _minimal_config_in(additional_objects=None)
+        assert c.additional_objects is None
+
+
+class TestTargetCatalogValidation:
+    """target_catalog must be a bare Databricks identifier or unset.
+
+    Without this guard a typo (hyphen, space, dot) sails through submit
+    and only fails mid-clone with an opaque Spark parser error -- the
+    user has already waited for provisioning to start before seeing it.
+    """
+
+    def test_unset_is_allowed(self):
+        # Default (None) means "use per-object base+suffix routing".
+        assert _minimal_config_in().target_catalog is None
+
+    def test_valid_identifier(self):
+        c = _minimal_config_in(target_catalog="odp_adw_sandbox_n")
+        assert c.target_catalog == "odp_adw_sandbox_n"
+
+    def test_leading_underscore_allowed(self):
+        c = _minimal_config_in(target_catalog="_internal_n")
+        assert c.target_catalog == "_internal_n"
+
+    def test_blank_string_treated_as_unset(self):
+        # "" / "   " collapse to None -- submitting an empty form field
+        # shouldn't activate the override.
+        assert _minimal_config_in(target_catalog="").target_catalog is None
+        assert _minimal_config_in(target_catalog="   ").target_catalog is None
+
+    def test_strips_whitespace(self):
+        c = _minimal_config_in(target_catalog="  odp_adw_sandbox_n  ")
+        assert c.target_catalog == "odp_adw_sandbox_n"
+
+    def test_hyphen_rejected(self):
+        with pytest.raises(ValidationError, match="bare Databricks identifier"):
+            _minimal_config_in(target_catalog="odp-adw-sandbox-n")
+
+    def test_space_rejected(self):
+        with pytest.raises(ValidationError, match="bare Databricks identifier"):
+            _minimal_config_in(target_catalog="my catalog")
+
+    def test_dot_rejected(self):
+        # Three-part FQN is wrong here -- target_catalog is a CATALOG name,
+        # not a fully-qualified table.
+        with pytest.raises(ValidationError, match="bare Databricks identifier"):
+            _minimal_config_in(target_catalog="cat.schema.table")
+
+    def test_starts_with_digit_rejected(self):
+        with pytest.raises(ValidationError, match="bare Databricks identifier"):
+            _minimal_config_in(target_catalog="42_catalog")

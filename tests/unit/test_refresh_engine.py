@@ -111,6 +111,22 @@ class TestFilterObjects:
     def test_selective_empty(self, fqns) -> None:
         assert _filter_objects([_obj()], "selective", fqns) == []
 
+    @pytest.mark.parametrize("mode", ["full", "incremental", "selective"])
+    def test_volume_rows_excluded_from_every_mode(self, mode) -> None:
+        # Volumes have no data to refresh and _generate_object_sql does
+        # not handle create_volume -- filter must drop them regardless of
+        # mode so the engine never tries to refresh one.
+        table_row = _obj(src="prod_cat.s1.t1")
+        volume_row = {
+            **_obj(src="prod_cat", tgt="dev_cat.dr_100_import_main.main_volume",
+                   strategy="create_volume"),
+            "object_type": "volume",
+        }
+        rows = [table_row, volume_row]
+        kept = _filter_objects(rows, mode, ["prod_cat.s1.t1", "prod_cat"])
+        for r in kept:
+            assert r["object_type"] != "volume"
+
 
 # ------------------------------------------------------------------
 # refresh_dr orchestration

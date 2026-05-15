@@ -54,8 +54,8 @@ variables:
     default: odp_adw_support_n
 
   control_schema:
-    description: Schema where the DevMirror control / config tables live
-    default: devmirror
+    description: Schema where the FastSetup control / config tables live
+    default: fastsetup
 
   admin_group:
     description: Account-level group whose members get the admin role in the app
@@ -68,7 +68,7 @@ variables:
       the LH workspace where the app SP can't read SCIM and OBO
       user_api_scopes isn't enabled.  Adding/removing admins here
       requires a redeploy.
-    default: jince.james.sp@dlh.de
+    default: jince.james.sp@dlh.de,artur.plath@lhsystems.com,andre.lauer@dlh.de,david.johnson.u118433.sp@lhsystems.com,brijesh.kumar@dlh.de,michal.kaszalowicz@lhsystems.com,mikita.kandratsiuk.sp@dlh.de,bulbul.parekh.sp@dlh.de,prashant.kathuria.sp@dlh.de
 
   lineage_system_table:
     description: |
@@ -82,7 +82,11 @@ variables:
 
   app_name:
     description: Databricks App resource name
-    default: devmirror
+    default: fastsetup
+
+  app_description:
+    description: Human-readable description shown on the Databricks App resource
+    default: FastSetup -- UC dev environment cloning (LH)
 
   smtp_password_secret:
     description: Apps Secret resource key for DEVMIRROR_SMTP_PASSWORD (set when LH enables email)
@@ -102,21 +106,67 @@ variables:
 
   remote_workspace_host:
     description: HTTPS host of the remote workspace to also search (empty = local-only)
-    default: ""
+    default: https://adb-7405613206681739.19.azuredatabricks.net
 
   remote_workspace_label:
     description: Friendly label shown in search results for the remote workspace
-    default: ""
+    default: Pre-prod
+
+  remote_workspace_id:
+    description: |
+      Numeric workspace ID for the remote workspace (the digits in
+      `adb-<id>.<shard>.azuredatabricks.net`).  Passed explicitly so
+      the SDK Config carries the REMOTE workspace ID instead of the
+      auto-injected DATABRICKS_WORKSPACE_ID (= local support workspace).
+    default: "7405613206681739"
 
   remote_workspace_token_secret:
-    description: Apps Secret resource key carrying the PAT for the remote workspace
+    description: |
+      Apps Secret resource key carrying the PAT for the remote workspace.
+      Kept for backwards compat; leave empty when using OAuth M2M (the
+      pre-prod path, since LH disables PATs in that workspace).
     default: ""
+
+  remote_workspace_client_id:
+    description: |
+      OAuth M2M client_id (= SP applicationId) for the remote workspace.
+      Used when the remote disables PATs; takes precedence over
+      remote_workspace_token_secret when both are set.
+    default: d0ea0ebd-4949-4d9d-9154-956c8fb83609
+
+  remote_workspace_client_secret_resource:
+    description: |
+      Apps Secret resource NAME (the alias the app uses to reference
+      the underlying secret).  Matches the `valueFrom:` value in
+      `app/app.yaml`.  The resource itself is declared below in the
+      app's `resources:` block; this var keeps name + valueFrom in
+      lockstep.
+    default: lh-preprod-oauth-secret
+
+  remote_workspace_client_secret_scope:
+    description: |
+      Databricks secret scope where the OAuth client_secret value lives
+      (AKV-backed in LH:  odp-adw-weur-scope-009 -> AKV
+      odp-weur-kv-adw-009-n).
+    default: odp-adw-weur-scope-009
+
+  remote_workspace_client_secret_key:
+    description: |
+      Key within the scope above that holds the OAuth client_secret.
+      Same name as the AKV secret name; LH uses
+      `devmirror-preprod-oauth-client-secret` (hyphens only -- AKV's
+      ^[0-9a-zA-Z-]+$ constraint).
+    default: devmirror-preprod-oauth-client-secret
 
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
 targets:
-  lh:
+  # ---- Dev deployment (support workspace) -----------------------------------
+  # App `fastsetup` runs in the support workspace.  Inherits all bundle-var
+  # defaults above (which describe the dev configuration -- warehouse,
+  # control catalog, remote workspace = pre-prod, etc.).
+  lh-dev:
     default: true
     mode: production
     workspace:
@@ -139,6 +189,40 @@ targets:
       paths:
         - ../../app
 
+  # ---- Pre-prod deployment (pre-prod workspace) -----------------------------
+  # Sibling deployment `fastsetup-i` running INSIDE the pre-prod workspace.
+  # Local source = pre-prod itself; no remote workspace (the dev/UAT app
+  # listing isn't relevant from a pre-prod-facing UI).  Provisioning targets
+  # still land in `_n` catalogs (LH's deliberate convention -- dev clones
+  # AND QA clones both land in `_n`, distinguished only by schema-name
+  # prefix).  Control plane: `odp_adw_support_i.fastsetup`.
+  #
+  # IMPORTANT: `app/app.yaml` also has to carry pre-prod-specific env
+  # values (WAREHOUSE_ID / CONTROL_CATALOG / empty REMOTE_WORKSPACE_*).
+  # This split lives on the `customer/LH-preprod` git branch -- bundle
+  # `--target` selects the workspace; the branch selects the runtime env.
+  lh-preprod:
+    mode: production
+    workspace:
+      host: https://adb-7405613206681739.19.azuredatabricks.net
+      # Separate root_path so the two targets don't share `.bundle` state.
+      root_path: /Workspace/Shared/devmirror-preprod/.bundle
+    sync:
+      paths:
+        - ../../app
+    variables:
+      app_name: fastsetup-i
+      app_description: FastSetup -- UC dev environment cloning (LH pre-prod)
+      control_catalog: odp_adw_support_i
+      warehouse_id: ddd608fa0bad97a1
+      remote_workspace_host: ""
+      remote_workspace_label: ""
+      remote_workspace_id: ""
+      remote_workspace_client_id: ""
+      remote_workspace_client_secret_resource: ""
+      remote_workspace_client_secret_scope: ""
+      remote_workspace_client_secret_key: ""
+
 # ---------------------------------------------------------------------------
 # Wheel artifact
 # ---------------------------------------------------------------------------
@@ -146,11 +230,22 @@ targets:
 # output lands inside the sync root.  pip is pointed at ../.. (the repo
 # root) for the actual project source.  Result: wheel at
 # customers/lh/dist/devmirror-*.whl, referenced below as dist/*.whl.
+#
+# We also drop the wheel into ../../app/dist/ so the FastAPI app's
+# `requirements.txt` can pip-install it at runtime (the line
+# `./dist/devmirror-0.1.0-py3-none-any.whl`).  Without this copy, the
+# wheel only reaches the lifecycle job's serverless environment and the
+# app would fall back to whatever stale `devmirror` source happens to
+# be on `sys.path`.
 artifacts:
   devmirror_wheel:
     type: whl
     path: .
-    build: pip wheel --no-deps --wheel-dir dist ../..
+    build: |
+      pip wheel --no-deps --wheel-dir dist ../.. \
+      && rm -rf ../../app/dist \
+      && mkdir -p ../../app/dist \
+      && cp dist/*.whl ../../app/dist/
 
 # ---------------------------------------------------------------------------
 # Resources: lifecycle job + app
@@ -221,10 +316,38 @@ resources:
               - dist/*.whl
 
   apps:
-    devmirror:
+    fastsetup:
       name: ${var.app_name}
       source_code_path: ../../app
-      description: DevMirror -- UC dev environment cloning (LH)
+      description: ${var.app_description}
+      # App resources -- referenced from `app/app.yaml` env entries via
+      # `valueFrom: <resource-name>`.  Declared HERE in the bundle so
+      # `databricks bundle deploy` reapplies them on every deploy --
+      # otherwise the app's resource list gets wiped to empty on
+      # reconcile and `valueFrom:` lookups fail with auth errors at
+      # startup.
+      # Apps Secret resource for cross-workspace OAuth M2M client_secret.
+      # COMMENTED OUT to support targets where no remote workspace is
+      # configured (e.g. the `lh-preprod` target, which runs inside the
+      # remote workspace itself).  An Apps Secret resource with empty
+      # scope/key is rejected by the platform, so we cannot keep the
+      # declaration present-but-empty.  To re-enable for a target that
+      # DOES have a remote workspace:
+      #   1. Populate the seven `remote_workspace_*` vars for that target.
+      #   2. Mint the OAuth client_secret in the remote workspace and
+      #      push it to the configured scope/key (AKV-backed in LH).
+      #   3. Grant the app SP READ on the scope.
+      #   4. Uncomment the block below and redeploy.
+      # NOTE: when re-enabled the resource is RE-APPLIED on every deploy --
+      # otherwise DAB reconcile wipes the app's resource list to empty
+      # and `valueFrom:` lookups fail at startup.
+      # resources:
+      #   - name: ${var.remote_workspace_client_secret_resource}
+      #     description: OAuth M2M client_secret for cross-workspace search
+      #     secret:
+      #       scope: ${var.remote_workspace_client_secret_scope}
+      #       key: ${var.remote_workspace_client_secret_key}
+      #       permission: READ
       config:
         env:
           - name: DEVMIRROR_WAREHOUSE_ID
@@ -237,8 +360,42 @@ resources:
             value: ${var.admin_group}
           - name: DEVMIRROR_ADMIN_EMAILS
             value: ${var.admin_emails}
+          # LH SCIM gap: app SP can't filter-list arbitrary users.
+          # Without this bypass, every developer/qa_user is rejected
+          # as "not found" and no grants land.  See app/app.yaml.
+          - name: DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK
+            value: "true"
           - name: DEVMIRROR_LINEAGE_SYSTEM_TABLE
             value: ${var.lineage_system_table}
+          # LH SDLC catalog suffix scheme -- strip known suffix from source
+          # catalog and re-attach env's suffix per object.  See
+          # devmirror/utils/naming.py:resolve_target_catalog.
+          #
+          # LH-specific decision: dev AND QA both target the `_n` catalog
+          # (QA_CATALOG_SUFFIX=_n, not _i).  Dev vs QA is distinguished by
+          # the schema-name prefix alone (`dr_<num>_*` vs `qa_<num>_*`).
+          - name: DEVMIRROR_PROD_CATALOG_SUFFIX
+            value: _p
+          - name: DEVMIRROR_DEV_CATALOG_SUFFIX
+            value: _n
+          - name: DEVMIRROR_QA_CATALOG_SUFFIX
+            value: _n
+          # Recognition set: suffixes the engine treats as source SDLC
+          # suffix and strips before re-attaching the env-specific landing
+          # suffix.  LH's landing trio collapses to (_p, _n) because QA
+          # routes into _n, but pre-prod sources still end in `_i`, so we
+          # must keep `_i` in the recognition set even though no env
+          # *lands* there.
+          - name: DEVMIRROR_KNOWN_CATALOG_SUFFIXES
+            value: _p,_i,_n
+          # Per-DR import schema + Volume: one per (env, source-catalog).
+          # Schema name: `<schema_prefix>_<suffix>` (e.g. `dr_<n>_import_main`).
+          # Volume name: `<volume>` inside the import schema.
+          # Both env vars must be non-empty to activate.
+          - name: DEVMIRROR_IMPORT_SCHEMA_SUFFIX
+            value: import_main
+          - name: DEVMIRROR_IMPORT_VOLUME_NAME
+            value: main_volume
           # SMTP placeholders -- safe to deploy empty; the notifier treats
           # blank values as "not configured" and no-ops.  When LH wants to
           # enable notifications, fill these in (or switch to valueFrom:
@@ -253,16 +410,28 @@ resources:
             value: ""
           - name: DEVMIRROR_SMTP_USE_TLS
             value: "true"
-          # Multi-workspace stream search.  Empty by default (local-only).
-          # To enable, set the bundle vars `remote_workspace_host`,
-          # `remote_workspace_label`, and `remote_workspace_token_secret`
-          # (the secret-resource key), and switch the TOKEN env entry to
-          # `valueFrom: ${var.remote_workspace_token_secret}`.
+          # Multi-workspace stream search.  Remote = LH pre-prod /
+          # integration (adb-7405613206681739) so devs can find pre-prod
+          # jobs/pipelines from the DevMirror UI search.
+          #
+          # Auth: pre-prod disables PATs, so we use OAuth M2M.  The
+          # CLIENT_ID is the SP applicationId; the CLIENT_SECRET comes
+          # from the Apps Secret resource `lh-preprod-oauth-secret`,
+          # which is declared in `resources:` above (bound to the
+          # underlying AKV-backed scope/key).  TOKEN env stays empty --
+          # the runtime dispatcher picks OAuth M2M when CLIENT_ID +
+          # CLIENT_SECRET are both set.
           - name: DEVMIRROR_LOCAL_WORKSPACE_LABEL
             value: ${var.local_workspace_label}
           - name: DEVMIRROR_REMOTE_WORKSPACE_HOST
             value: ${var.remote_workspace_host}
           - name: DEVMIRROR_REMOTE_WORKSPACE_LABEL
             value: ${var.remote_workspace_label}
+          - name: DEVMIRROR_REMOTE_WORKSPACE_ID
+            value: ${var.remote_workspace_id}
+          - name: DEVMIRROR_REMOTE_WORKSPACE_CLIENT_ID
+            value: ${var.remote_workspace_client_id}
+          - name: DEVMIRROR_REMOTE_WORKSPACE_CLIENT_SECRET
+            valueFrom: ${var.remote_workspace_client_secret_resource}
           - name: DEVMIRROR_REMOTE_WORKSPACE_TOKEN
             value: ""

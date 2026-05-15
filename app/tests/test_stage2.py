@@ -438,6 +438,9 @@ class TestListDrs:
             "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
             "created_by": "dev@example.com",
         }]
+        # Object count comes from a single grouped query, not from
+        # iterating per-DR.  Empty here -> total_objects defaults to 0.
+        MockObjRepo.return_value.counts_by_dr_id.return_value = {}
 
         resp = client.get("/api/drs")
         assert resp.status_code == 200
@@ -445,6 +448,37 @@ class TestListDrs:
         assert data["total"] == 1
         assert data["drs"][0]["dr_id"] == "DR-1042"
         assert data["drs"][0]["total_objects"] == 0
+
+    @patch("devmirror.control.control_table.DrObjectRepository")
+    @patch("devmirror.control.control_table.DRRepository")
+    def test_list_drs_populates_object_counts(
+        self, MockDRRepo, MockObjRepo, client, mock_db,
+    ):
+        # Two DRs in the active list, with different object counts.
+        # The endpoint must populate total_objects from the
+        # counts_by_dr_id map (one batch query, no N+1).
+        MockDRRepo.return_value.list_active.return_value = [
+            {"dr_id": "DR-1042", "status": "ACTIVE", "description": None,
+             "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+             "created_by": "dev@example.com"},
+            {"dr_id": "DR-2000", "status": "ACTIVE", "description": None,
+             "expiration_date": "2026-06-01", "created_at": "2026-04-02T00:00:00",
+             "created_by": "dev@example.com"},
+        ]
+        MockObjRepo.return_value.counts_by_dr_id.return_value = {
+            "DR-1042": 7,
+            "DR-2000": 3,
+        }
+
+        resp = client.get("/api/drs")
+        assert resp.status_code == 200
+        data = resp.json()
+        by_id = {d["dr_id"]: d["total_objects"] for d in data["drs"]}
+        assert by_id == {"DR-1042": 7, "DR-2000": 3}
+        # Verify exactly one batch call was made with both ids.
+        MockObjRepo.return_value.counts_by_dr_id.assert_called_once()
+        kwargs = MockObjRepo.return_value.counts_by_dr_id.call_args.kwargs
+        assert sorted(kwargs["dr_ids"]) == ["DR-1042", "DR-2000"]
 
 
 # ---- Cleanup endpoint tests ----

@@ -42,12 +42,24 @@ cd customers/lh && databricks bundle deployment bind devmirror devmirror --auto-
 ## Deploy
 
 ```bash
+# Optional for bundle-driven deploys -- the customer bundle's
+# `artifacts.devmirror_wheel` build step also produces app/dist/*.whl.
+# Run this only for a frontend-only refresh or for non-bundle deploys
+# (e.g. `databricks apps deploy`).
 cd /Users/jince.james/projects/devmirror && ./scripts/build_app.sh
 ```
 
 ```bash
 cd customers/lh && databricks bundle deploy --profile lh-dev && databricks bundle run devmirror --profile lh-dev
 ```
+
+The bundle artifact builds the engine wheel into both
+`customers/lh/dist/` (consumed by the lifecycle job's serverless
+environment) AND `app/dist/` (consumed by the FastAPI app at runtime
+via `app/requirements.txt`).  There is **no** `app/devmirror/` source
+mirror -- that historical staging directory was deleted because it
+silently shadowed the wheel and drifted between deploys.  The engine
+package is always pip-installed from the freshly-built wheel.
 
 ## REQUIRED post-deploy step — stream-search visibility
 
@@ -424,3 +436,23 @@ deploy:
   table's columns (`source_table_full_name`, `target_table_full_name`,
   `event_time`, etc. -- see `devmirror/scan/lineage.py:69-98`); LH
   confirmed this when the view was created.
+- **Per-object target catalog routing (LH SDLC suffix model).** The
+  LH platform organizes SDLC environments by *catalog suffix* on a
+  shared base name: `<base>_p` is prod, `<base>_i` is QA/integration,
+  `<base>_n` is dev. `devmirror/utils/naming.py:resolve_target_catalog()`
+  strips a known suffix (`_p`/`_i`/`_n`) from the source catalog and
+  re-attaches the env's suffix per object, so a single DR can clone
+  objects spanning multiple base catalogs (e.g. `odp_adw_ancillaries_p`
+  and `odp_adw_offers_p`) into their respective target catalogs.
+  **LH-specific deployment decision:** both dev AND QA clones land in
+  the `_n` catalog (`DEVMIRROR_QA_CATALOG_SUFFIX=_n`, not `_i`) — dev
+  vs QA is distinguished by the schema-name prefix alone
+  (`dr_<num>_*` vs `qa_<num>_*`). The customer's `_i` catalogs remain
+  in UC; this deployment simply doesn't write to them. Suffix values
+  are pinned in `app/app.yaml` and `customers/lh/databricks.yml` via
+  `DEVMIRROR_DEV_CATALOG_SUFFIX=_n` and `DEVMIRROR_QA_CATALOG_SUFFIX=_n`.
+  The legacy single-target-catalog escape hatch
+  (`ConfigIn.target_catalog` -> `_target_catalog_override()` ->
+  `DEVMIRROR_TARGET_CATALOG`) still wins when explicitly set: every
+  object in the DR is forced into that one catalog. Leave it empty
+  (the default) and the per-object suffix routing applies.

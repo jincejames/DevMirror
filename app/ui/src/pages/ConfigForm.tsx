@@ -41,6 +41,12 @@ export default function ConfigForm() {
   const { role, email } = useUser();
 
   const [form, setForm] = useState<ConfigIn>({ ...EMPTY_FORM });
+  // Raw textarea content for additional_objects, kept separate from
+  // form.additional_objects so Enter/newline keystrokes are preserved
+  // verbatim.  We parse it (split on [,\n], trim, drop blanks) into
+  // form.additional_objects on every keystroke so submit/validation sees
+  // a clean list while the textarea shows exactly what the user typed.
+  const [additionalObjectsText, setAdditionalObjectsText] = useState('');
   const [errors, setErrors] = useState<FieldError[]>([]);
   const [showBanner, setShowBanner] = useState(false);
   const [isValid, setIsValid] = useState(false);
@@ -59,14 +65,16 @@ export default function ConfigForm() {
     setLoading(true);
     getConfig(drId)
       .then((out) => {
+        const loadedAdditional = out.config.additional_objects ?? [];
         setForm({
           ...out.config,
           streams: out.config.streams ?? [],
-          additional_objects: out.config.additional_objects ?? [],
+          additional_objects: loadedAdditional,
           developers: out.config.developers ?? [],
           qa_users: out.config.qa_users ?? [],
           notification_recipients: out.config.notification_recipients ?? [],
         });
+        setAdditionalObjectsText(loadedAdditional.join('\n'));
         setCreatedBy(out.created_by ?? '');
         setErrors(out.validation_errors);
         setStatus(out.status);
@@ -283,8 +291,18 @@ export default function ConfigForm() {
   }
 
   function handleAdditionalObjectsChange(value: string) {
-    const lines = value.split('\n').filter((l) => l.trim() !== '');
-    set('additional_objects', lines.length > 0 ? lines : []);
+    // Preserve the user's exact typed text -- including trailing newlines
+    // and intermediate blank lines -- by storing it verbatim in
+    // additionalObjectsText.  Separately compute a cleaned list for the
+    // form state so the rest of the submit/validation pipeline sees a
+    // sanitized array.  Accept BOTH newlines and commas as separators so
+    // users can paste either form (or a mix).
+    setAdditionalObjectsText(value);
+    const tokens = value
+      .split(/[,\n]/)
+      .map((t) => t.trim())
+      .filter((t) => t !== '');
+    set('additional_objects', tokens);
   }
 
   if (loading) return <p>Loading...</p>;
@@ -357,29 +375,37 @@ export default function ConfigForm() {
             {fieldError('streams') && <span className="field-error-msg">{fieldError('streams')}</span>}
           </div>
           <div className="form-field">
-            <label htmlFor="additional_objects">Additional Objects (one FQN per line)</label>
+            <label htmlFor="additional_objects">
+              Additional Objects <span style={{ fontWeight: 'normal', opacity: 0.7 }}>(one FQN per line OR comma-separated; both work)</span>
+            </label>
             <textarea
               id="additional_objects"
-              value={(form.additional_objects ?? []).join('\n')}
+              value={additionalObjectsText}
               onChange={(e) => handleAdditionalObjectsChange(e.target.value)}
-              rows={3}
-              placeholder="catalog.schema.table"
+              rows={5}
+              placeholder={'catalog.schema.table1\ncatalog.schema.table2\n\n-- or --\n\ncatalog.schema.table1, catalog.schema.table2'}
               className={fieldClass('additional_objects')}
             />
             {fieldError('additional_objects') && <span className="field-error-msg">{fieldError('additional_objects')}</span>}
           </div>
           <div className="form-field">
-            <label htmlFor="target_catalog">Target Catalog</label>
+            <label htmlFor="target_catalog">
+              Override target catalog <span style={{ fontWeight: 'normal', opacity: 0.7 }}>(advanced — leave empty for default routing)</span>
+            </label>
             <input
               id="target_catalog"
               type="text"
               value={form.target_catalog ?? ''}
               onChange={(e) => set('target_catalog', e.target.value || null)}
-              placeholder="e.g. dev_analytics (leave empty for auto-derived)"
+              placeholder="Leave empty unless you need to force every object into one catalog"
               className={fieldClass('target_catalog')}
             />
             {fieldError('target_catalog') && <span className="field-error-msg">{fieldError('target_catalog')}</span>}
-            <small>The catalog where cloned objects will be created. If empty, derived from source catalog name.</small>
+            <small>
+              <strong>Default (empty):</strong> each object is cloned into <code>&lt;source_base&gt;_n</code> for dev / <code>&lt;source_base&gt;_i</code> for QA — different sources route to their own base catalogs (e.g. <code>odp_adw_ancillaries_p</code> → <code>odp_adw_ancillaries_n</code>).
+              <br />
+              <strong>If set:</strong> the per-object routing is bypassed and <em>every</em> object in this DR is cloned into the catalog you enter, regardless of source.  Use only when you have a specific reason (e.g. dropping all clones into a shared sandbox catalog).
+            </small>
           </div>
         </fieldset>
 

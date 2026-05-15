@@ -52,11 +52,19 @@ class DbClient:
             raise
 
     def delete_schema(self, catalog: str, schema: str) -> None:
-        """Delete a schema (best effort)."""
-        import contextlib
+        """Delete a schema, forcing drop of contained objects.
 
-        with contextlib.suppress(Exception):
-            self._client.schemas.delete(f"{catalog}.{schema}")
+        ``force=True`` matches CASCADE semantics so unexpected residual
+        objects (e.g. a clone that failed mid-flight, or an
+        externally-created table in the schema) don't silently block
+        cleanup.
+
+        Exceptions are NOT swallowed -- they propagate to the caller so
+        ``cleanup_engine`` can record `schemas_failed` and surface the
+        problem in the audit log.  Callers that want best-effort
+        semantics must wrap the call themselves.
+        """
+        self._client.schemas.delete(f"{catalog}.{schema}", force=True)
 
     # ------------------------------------------------------------------
     # Grant operations via SDK

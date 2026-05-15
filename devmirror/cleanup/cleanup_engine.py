@@ -141,11 +141,21 @@ def cleanup_dr(
                 logger.error("Revoke failed: %s -- %s", msg, exc)
                 result.revokes_failed.append((msg, str(exc)))
 
-    # Drop objects using SDK delete_table (views first, then tables)
+    # Drop objects in three groups, in order: views, then tables, then
+    # volumes.  Order doesn't strictly matter for UC (no FK constraints
+    # across these types) but keeps logs predictable.  Volumes use a
+    # different DDL path (DROP VOLUME) because delete_table only handles
+    # tables/views.  The subsequent schema-drop pass would CASCADE-drop
+    # the volume anyway, but doing it explicitly here lets us record an
+    # accurate per-object status and surface failures distinctly.
     views = [o for o in objects if o.get("object_type") == "view"]
-    tables = [o for o in objects if o.get("object_type") != "view"]
+    volumes = [o for o in objects if o.get("object_type") == "volume"]
+    tables = [
+        o for o in objects
+        if o.get("object_type") not in ("view", "volume")
+    ]
 
-    for obj in views + tables:
+    for obj in views + tables + volumes:
         obj_status_raw = obj.get("status", "")
 
         if obj_status_raw == ObjectStatus.DROPPED.value:
@@ -155,7 +165,13 @@ def cleanup_dr(
         target_fqn = obj.get("target_fqn", "")
 
         try:
-            db_client.delete_table(target_fqn)
+            if obj.get("object_type") == "volume":
+                # DROP VOLUME is its own DDL -- delete_table only knows
+                # about tables/views.  IF EXISTS keeps cleanup idempotent
+                # under partial-rollback scenarios.
+                db_client.sql_exec(f"DROP VOLUME IF EXISTS {target_fqn}")
+            else:
+                db_client.delete_table(target_fqn)
             result.objects_dropped += 1
 
             try:

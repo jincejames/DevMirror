@@ -154,10 +154,10 @@ def validate_object_status_transition(current: ObjectStatus, target: ObjectStatu
 
 
 class DRRepository:
-    """CRUD operations for ``devmirror_development_requests``."""
+    """CRUD operations for ``fastsetup_development_requests``."""
 
     def __init__(self, fqn_prefix: str) -> None:
-        self._table = f"{fqn_prefix}.devmirror_development_requests"
+        self._table = f"{fqn_prefix}.fastsetup_development_requests"
 
     @property
     def table_fqn(self) -> str:
@@ -298,10 +298,10 @@ class DRRepository:
 
 
 class DrObjectRepository:
-    """CRUD operations for ``devmirror_dr_objects``."""
+    """CRUD operations for ``fastsetup_dr_objects``."""
 
     def __init__(self, fqn_prefix: str) -> None:
-        self._table = f"{fqn_prefix}.devmirror_dr_objects"
+        self._table = f"{fqn_prefix}.fastsetup_dr_objects"
 
     @property
     def table_fqn(self) -> str:
@@ -399,6 +399,39 @@ class DrObjectRepository:
         sql = f"SELECT * FROM {self._table} WHERE dr_id = :dr_id"
         return db_client.sql_with_params(sql, {"dr_id": dr_id})
 
+    def counts_by_dr_id(
+        self, db_client: Any, *, dr_ids: list[str],
+    ) -> dict[str, int]:
+        """Return ``{dr_id: object_count}`` for the given DR ids.
+
+        Implementation: a single unfiltered ``GROUP BY dr_id`` over the
+        whole ``fastsetup_dr_objects`` table, then filter in Python.
+        Avoids the IN-clause-with-named-params shape, which was prone
+        to upstream errors against the LH workspace's Statement
+        Execution API.  Cost is negligible -- the object table
+        typically has at most low-thousands of rows, and the engine
+        only runs the GROUP BY once per ``/api/drs`` call.
+
+        DR ids passed in but absent from the result map back to 0 via
+        the caller's ``.get(dr_id, 0)``.
+        """
+        if not dr_ids:
+            return {}
+        sql = f"SELECT dr_id, COUNT(*) AS n FROM {self._table} GROUP BY dr_id"
+        rows = db_client.sql(sql)
+        wanted = set(dr_ids)
+        out: dict[str, int] = {}
+        for r in rows:
+            dr_id = r.get("dr_id")
+            if not dr_id or dr_id not in wanted:
+                continue
+            n = r.get("n")
+            try:
+                out[dr_id] = int(n) if n is not None else 0
+            except (ValueError, TypeError):
+                continue
+        return out
+
     def delete_by_dr_id(self, db_client: Any, *, dr_id: str) -> str:
         """Delete all object rows for a DR (used before re-provisioning)."""
         sql = f"DELETE FROM {self._table} WHERE dr_id = :dr_id"
@@ -407,10 +440,10 @@ class DrObjectRepository:
 
 
 class DrAccessRepository:
-    """CRUD operations for ``devmirror_dr_access``."""
+    """CRUD operations for ``fastsetup_dr_access``."""
 
     def __init__(self, fqn_prefix: str) -> None:
-        self._table = f"{fqn_prefix}.devmirror_dr_access"
+        self._table = f"{fqn_prefix}.fastsetup_dr_access"
 
     @property
     def table_fqn(self) -> str:

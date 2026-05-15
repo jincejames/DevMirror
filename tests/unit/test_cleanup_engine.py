@@ -142,6 +142,36 @@ class TestCleanupDr:
         if view_idx is not None and table_idx is not None:
             assert view_idx < table_idx
 
+    def test_volume_dropped_with_volume_ddl(self) -> None:
+        """Volumes use DROP VOLUME, not delete_table -- delete_table only
+        knows about tables/views.  The import schema then gets dropped
+        by the regular schema-drop pass."""
+        objs = [
+            {"dr_id": "DR-1", "source_fqn": "prod_p", "target_fqn": "prod_n.dr_1_s.t",
+             "target_environment": "dev", "object_type": "table", "status": "PROVISIONED"},
+            {"dr_id": "DR-1", "source_fqn": "prod_p",
+             "target_fqn": "prod_n.dr_1_import_main.main_volume",
+             "target_environment": "dev", "object_type": "volume",
+             "status": "PROVISIONED"},
+        ]
+        db, dr, obj, acc, aud = _repos(objs=objs)
+        cleanup_dr("DR-1", db_client=db, dr_repo=dr, obj_repo=obj,
+                   access_repo=acc, audit_repo=aud)
+        # The volume must have gone through sql_exec("DROP VOLUME ..."),
+        # not delete_table.
+        delete_table_calls = [c.args[0] for c in db.delete_table.call_args_list]
+        assert "prod_n.dr_1_import_main.main_volume" not in delete_table_calls
+        sql_exec_calls = [c.args[0] for c in db.sql_exec.call_args_list]
+        assert any(
+            "DROP VOLUME IF EXISTS prod_n.dr_1_import_main.main_volume" in s
+            for s in sql_exec_calls
+        )
+        # And the import schema must be in the schema-drop list because
+        # _collect_schemas_from_objects derives <catalog>.<schema> from
+        # any 3-part target_fqn.
+        delete_schema_args = [c.args for c in db.delete_schema.call_args_list]
+        assert ("prod_n", "dr_1_import_main") in delete_schema_args
+
 
 class TestFindExpiredDrs:
     def test_query_criteria(self) -> None:

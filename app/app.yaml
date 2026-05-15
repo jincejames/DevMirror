@@ -25,11 +25,11 @@ user_api_scopes:
   - iam.current-user:read
 env:
   - name: DEVMIRROR_WAREHOUSE_ID
-    value: bda66ae121230af9
+    value: ddd608fa0bad97a1
   - name: DEVMIRROR_CONTROL_CATALOG
-    value: odp_adw_support_n
+    value: odp_adw_support_i
   - name: DEVMIRROR_CONTROL_SCHEMA
-    value: devmirror
+    value: fastsetup
   - name: DEVMIRROR_ADMIN_GROUP
     value: lhg-odp-adw-support-admin
   # Static admin-emails list (comma-separated, case-insensitive).  Any
@@ -39,7 +39,16 @@ env:
   # disabled).  Members of DEVMIRROR_ADMIN_GROUP still get admin via
   # the SCIM path when reachable; the two paths layer.
   - name: DEVMIRROR_ADMIN_EMAILS
-    value: jince.james.sp@dlh.de
+    value: jince.james.sp@dlh.de,artur.plath@lhsystems.com,andre.lauer@dlh.de,david.johnson.u118433.sp@lhsystems.com,brijesh.kumar@dlh.de,michal.kaszalowicz@lhsystems.com,mikita.kandratsiuk.sp@dlh.de,bulbul.parekh.sp@dlh.de,prashant.kathuria.sp@dlh.de
+  # In LH the app SP cannot read SCIM for individual users (only for
+  # members of its own groups).  Without this bypass, every developer
+  # email gets filter-listed and returns 0 results, so apply_grants
+  # rejects ALL of them and zero grants land on the cloned objects.
+  # With the bypass on, UC's GRANT API still rejects bad principals at
+  # execution time, so we don't risk silently granting to typos -- we
+  # just stop pre-filtering them.
+  - name: DEVMIRROR_SKIP_PRINCIPAL_SCIM_CHECK
+    value: "true"
   # System-table override for environments that expose lineage via a
   # curated view rather than direct `system.access.table_lineage`
   # access.  LH publishes views in `odp_global.domain_adw` following
@@ -49,6 +58,48 @@ env:
   # `system.access.table_lineage`.
   - name: DEVMIRROR_LINEAGE_SYSTEM_TABLE
     value: odp_global.domain_adw.sys_access_table_lineage
+  # ---- LH SDLC catalog suffix scheme ------------------------------------
+  # LH organizes SDLC environments by *catalog suffix* on a shared base
+  # name (`odp_adw_ancillaries_p` -> prod, `_i` -> QA/integration,
+  # `_n` -> dev in the platform-wide convention).
+  # `resolve_target_catalog()` strips a known suffix from the source and
+  # re-attaches the env's suffix per object, so a single DR can clone
+  # objects from multiple base catalogs into their corresponding env
+  # catalogs.  The PROD value is informational; the logic strips any of
+  # `_p`/`_i`/`_n` regardless.
+  #
+  # LH-specific deployment decision: BOTH dev and QA clones land in the
+  # `_n` catalog (DEVMIRROR_QA_CATALOG_SUFFIX=_n).  Dev vs QA is then
+  # distinguished by the schema-name prefix alone (`dr_<num>_*` vs
+  # `qa_<num>_*`).  The customer's `_i` catalogs remain untouched; this
+  # deployment simply doesn't write to them.
+  - name: DEVMIRROR_PROD_CATALOG_SUFFIX
+    value: _p
+  - name: DEVMIRROR_DEV_CATALOG_SUFFIX
+    value: _n
+  - name: DEVMIRROR_QA_CATALOG_SUFFIX
+    value: _n
+  # Recognition set: which suffixes the engine should treat as the
+  # source's SDLC suffix and strip when computing the target catalog.
+  # In LH the landing trio collapses to (_p, _n) because QA routes
+  # into _n, but pre-prod source catalogs still end in `_i`.  Without
+  # `_i` in the recognition set, sources like `odp_adw_revenue_management_i`
+  # never get their suffix stripped and would mis-route to
+  # `odp_adw_revenue_management_i_n`.
+  - name: DEVMIRROR_KNOWN_CATALOG_SUFFIXES
+    value: _p,_i,_n
+  # ---- Per-DR import schema + Volume ------------------------------------
+  # When both env vars are non-empty, the runner provisions one extra
+  # schema per (env, source-catalog) named
+  # `<schema_prefix>_<DEVMIRROR_IMPORT_SCHEMA_SUFFIX>` (e.g.
+  # `dr_00042_import_main` in dev, `qa_00042_import_main` in QA) and
+  # creates a managed Volume `<DEVMIRROR_IMPORT_VOLUME_NAME>` inside it.
+  # Used as a known landing spot for sideloaded artifacts that don't
+  # come from prod lineage.  Leave SCHEMA_SUFFIX empty to disable.
+  - name: DEVMIRROR_IMPORT_SCHEMA_SUFFIX
+    value: import_main
+  - name: DEVMIRROR_IMPORT_VOLUME_NAME
+    value: main_volume
   # ---- Multi-workspace stream search (optional) -------------------------
   # When DEVMIRROR_REMOTE_WORKSPACE_HOST and _TOKEN are both non-empty,
   # the /api/streams/search endpoint also queries the named remote
@@ -58,9 +109,36 @@ env:
   # customers/lh/README.md > "Multi-workspace stream search".
   - name: DEVMIRROR_LOCAL_WORKSPACE_LABEL
     value: local
+  # Remote workspace = LH pre-prod / integration environment.  Developers
+  # use the search to find jobs/pipelines that produce `_i` data in this
+  # workspace; the resulting DR sources `*_i.<schema>.<table>` rows, and
+  # the runner clones them into `*_n.dr_<num>_<schema>.<table>` (the
+  # known-suffix strip in resolve_target_catalog handles `_i` correctly).
+  #
+  # Authentication: pre-prod has Personal Access Tokens DISABLED by
+  # workspace policy, so we use OAuth M2M instead -- the SP's
+  # applicationId is the CLIENT_ID, and a workspace-generated OAuth
+  # secret (stored as Apps Secret `lh-preprod-oauth-secret`) is the
+  # CLIENT_SECRET.  `_build_remote_workspace_client` picks OAuth M2M
+  # whenever both CLIENT_ID + CLIENT_SECRET are non-empty.  The TOKEN
+  # entry below is a no-op placeholder for forward-compat.
+  #
+  # PRE-PROD DEPLOYMENT: This app runs inside the pre-prod workspace
+  # itself, so the "remote workspace" concept is unused.  All seven
+  # vars below are empty -- the dispatcher in router.py treats empty
+  # CLIENT_ID/CLIENT_SECRET as "no remote configured" and the search
+  # endpoint silently skips the remote leg.  To re-enable for some
+  # OTHER remote workspace later: populate these vars AND re-add the
+  # Apps Secret resource declaration in customers/lh/databricks.yml.
   - name: DEVMIRROR_REMOTE_WORKSPACE_HOST
     value: ""
   - name: DEVMIRROR_REMOTE_WORKSPACE_LABEL
+    value: ""
+  - name: DEVMIRROR_REMOTE_WORKSPACE_ID
+    value: ""
+  - name: DEVMIRROR_REMOTE_WORKSPACE_CLIENT_ID
+    value: ""
+  - name: DEVMIRROR_REMOTE_WORKSPACE_CLIENT_SECRET
     value: ""
   - name: DEVMIRROR_REMOTE_WORKSPACE_TOKEN
     value: ""

@@ -16,7 +16,19 @@ logger = logging.getLogger(__name__)
 # Safe identifier pattern for three-part FQNs.
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z0-9_]+$")
 
-VALID_STRATEGIES = frozenset({"shallow_clone", "deep_clone", "view", "schema_only"})
+VALID_STRATEGIES = frozenset(
+    {"shallow_clone", "deep_clone", "view", "schema_only", "create_volume"}
+)
+
+# Fixed directory tree carved out inside every provisioned import volume.
+# Order matters: parents before children so ``files.create_directory`` calls
+# don't race ahead of a missing intermediate path.
+IMPORT_VOLUME_SUBDIRS = (
+    "source",
+    "source/data",
+    "source/archive",
+    "source/ready",
+)
 
 
 class ClonerError(Exception):
@@ -55,11 +67,18 @@ def create_shallow_clone_sql(
     target_fqn: str,
     data_revision: DataRevision | None = None,
 ) -> str:
-    """Generate SQL for a shallow clone."""
+    """Generate SQL for a shallow clone.
+
+    ``CREATE OR REPLACE`` so re-provisioning the same target_fqn
+    refreshes in place instead of failing with "table exists".  Combined
+    with the runner's force_replace path (which drops v1 targets that v2
+    no longer plans to recreate), this guarantees provisioning is a
+    true replacement, not an additive layer.
+    """
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     rev = _revision_clause(data_revision)
-    return f"CREATE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"
+    return f"CREATE OR REPLACE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"
 
 
 def create_deep_clone_sql(
@@ -67,11 +86,11 @@ def create_deep_clone_sql(
     target_fqn: str,
     data_revision: DataRevision | None = None,
 ) -> str:
-    """Generate SQL for a deep clone."""
+    """Generate SQL for a deep clone (CREATE OR REPLACE -- see shallow)."""
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     rev = _revision_clause(data_revision)
-    return f"CREATE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"
+    return f"CREATE OR REPLACE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"
 
 
 def create_view_sql(
@@ -79,11 +98,11 @@ def create_view_sql(
     target_fqn: str,
     data_revision: DataRevision | None = None,
 ) -> str:
-    """Generate SQL for a view referencing the prod table."""
+    """Generate SQL for a view referencing the prod table (CREATE OR REPLACE)."""
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     rev = _revision_clause(data_revision)
-    return f"CREATE VIEW {target_fqn} AS SELECT * FROM {source_fqn}{rev}"
+    return f"CREATE OR REPLACE VIEW {target_fqn} AS SELECT * FROM {source_fqn}{rev}"
 
 
 def create_schema_only_sql(
@@ -94,6 +113,47 @@ def create_schema_only_sql(
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     return f"CREATE TABLE {target_fqn} LIKE {source_fqn}"
+
+
+def create_volume_sql(target_fqn: str) -> str:
+    """Generate SQL to create a managed Volume.
+
+    ``target_fqn`` is the three-part volume FQN
+    (``<catalog>.<schema>.<volume_name>``).  No source FQN involved --
+    a volume is a side-channel for sideloaded files, not a clone of
+    anything.  ``IF NOT EXISTS`` makes re-provisioning idempotent.
+    """
+    _validate_fqn(target_fqn, "target_fqn")
+    return f"CREATE VOLUME IF NOT EXISTS {target_fqn}"
+
+
+def _volume_path(target_fqn: str) -> str:
+    """Convert a three-part volume FQN to its Files API root path."""
+    catalog, schema, volume = target_fqn.split(".")
+    return f"/Volumes/{catalog}/{schema}/{volume}"
+
+
+def provision_volume_subdirs(db_client: DbClient, target_fqn: str) -> list[str]:
+    """Create the fixed ``source/{data,archive,ready}`` tree inside a volume.
+
+    Best-effort: each directory create is independent and idempotent at the
+    SDK level (``create_directory`` is a no-op when the path already exists).
+    Failures are logged but do NOT raise -- the volume itself is already
+    provisioned, and a missing subdir is a recoverable annoyance, not a
+    provisioning failure.
+
+    Returns the list of directory paths that were created (or already existed).
+    """
+    root = _volume_path(target_fqn)
+    created: list[str] = []
+    for sub in IMPORT_VOLUME_SUBDIRS:
+        path = f"{root}/{sub}"
+        try:
+            db_client.client.files.create_directory(directory_path=path)
+            created.append(path)
+        except Exception as exc:
+            logger.warning("Failed to create volume directory %s: %s", path, exc)
+    return created
 
 
 def generate_clone_sql(
@@ -115,6 +175,9 @@ def generate_clone_sql(
         return create_deep_clone_sql(source_fqn, target_fqn, data_revision)
     if strategy == "view":
         return create_view_sql(source_fqn, target_fqn, data_revision)
+    if strategy == "create_volume":
+        # source_fqn is ignored -- volumes are not clones of anything.
+        return create_volume_sql(target_fqn)
     # schema_only
     return create_schema_only_sql(source_fqn, target_fqn)
 
@@ -154,6 +217,10 @@ def execute_clone(
     try:
         logger.info("Cloning %s -> %s [%s]", source_fqn, target_fqn, strategy)
         db_client.sql_exec(sql)
+        if strategy == "create_volume":
+            # Carve out the fixed sideload layout (source/{data,archive,ready}).
+            # Best-effort: directory creation failures are warnings, not errors.
+            provision_volume_subdirs(db_client, target_fqn)
         return CloneResult(
             source_fqn=source_fqn,
             target_fqn=target_fqn,

@@ -57,7 +57,7 @@ def is_legacy_dr_id(dr_id: str) -> bool:
 
 
 class IdCounterRepository:
-    """Atomic counter for DR IDs, backed by ``devmirror_id_counter``.
+    """Atomic counter for DR IDs, backed by ``fastsetup_id_counter``.
 
     Usage::
 
@@ -73,7 +73,7 @@ class IdCounterRepository:
     """
 
     def __init__(self, fqn_prefix: str) -> None:
-        self._table = f"{fqn_prefix}.devmirror_id_counter"
+        self._table = f"{fqn_prefix}.fastsetup_id_counter"
 
     @property
     def table_fqn(self) -> str:

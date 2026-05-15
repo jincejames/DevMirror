@@ -41,7 +41,7 @@ class TestInsert:
         mock_db.sql_exec_with_params.assert_called_once()
         sql = mock_db.sql_exec_with_params.call_args[0][0]
         params = mock_db.sql_exec_with_params.call_args[0][1]
-        assert "INSERT INTO test_catalog.test_schema.devmirror_configs" in sql
+        assert "INSERT INTO test_catalog.test_schema.fastsetup_configs" in sql
         assert params["dr_id"] == "DR-100"
         assert params["created_by"] == "user@example.com"
         assert params["expiration_date"] == "2026-05-01"
@@ -122,7 +122,7 @@ class TestUpdate:
 
         sql = mock_db.sql_exec_with_params.call_args[0][0]
         params = mock_db.sql_exec_with_params.call_args[0][1]
-        assert "UPDATE test_catalog.test_schema.devmirror_configs" in sql
+        assert "UPDATE test_catalog.test_schema.fastsetup_configs" in sql
         assert "WHERE dr_id = :dr_id" in sql
         assert params["dr_id"] == "DR-100"
         assert params["description"] == "Updated"

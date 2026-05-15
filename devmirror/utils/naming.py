@@ -106,6 +106,29 @@ def target_object_fqn(
     return f"{target_catalog}.{prefix}_{original_schema}.{object_name}"
 
 
+def import_schema_fqn(
+    target_catalog: str,
+    dr_id: str,
+    env: Literal["dev", "qa"],
+    suffix: str,
+) -> str:
+    """Build the two-part FQN of the per-DR-per-env import schema.
+
+    Each provisioning run creates one of these schemas per source
+    catalog so the customer has a known location for sideloaded
+    artifacts (typically a managed Volume).  The returned FQN is
+    ``<target_catalog>.<schema_prefix>_<suffix>`` -- e.g.
+    ``odp_adw_ancillaries_n.dr_00042_import_main`` for dev or
+    ``odp_adw_ancillaries_n.qa_00042_import_main`` for QA.
+
+    The ``suffix`` is a deploy-time configuration value
+    (``DEVMIRROR_IMPORT_SCHEMA_SUFFIX``) so different customers can
+    standardise on different naming conventions.
+    """
+    prefix = schema_prefix(dr_id, env)
+    return f"{target_catalog}.{prefix}_{suffix}"
+
+
 def required_target_schemas(
     target_catalog: str,
     prod_schema_fqns: list[str],
@@ -124,18 +147,72 @@ def required_target_schemas(
     return result
 
 
-def resolve_target_catalog(source_catalog: str, env: str) -> str:
-    """Derive the target catalog name from a source catalog.
+def resolve_target_catalog(source_catalog: str, env: Literal["dev", "qa"]) -> str:
+    """Map a source catalog to the target catalog for ``env``.
 
-    If DEVMIRROR_TARGET_CATALOG is set, always use that catalog
-    regardless of source catalog name.
+    Resolution order:
+
+    1. ``DEVMIRROR_TARGET_CATALOG`` env var, if set, wins for every
+       object.  This is the explicit single-target override (set via
+       the per-DR ``ConfigIn.target_catalog`` field at request time).
+       Use sparingly -- it forces every object in the DR into the same
+       catalog regardless of its source base.
+    2. Otherwise, strip any known SDLC suffix from the source to
+       recover the base name and re-attach the env-specific suffix.
+       Default LH suffixes are prod ``_p``, QA ``_i``, dev ``_n``:
+
+         ``odp_adw_ancillaries_p`` + dev -> ``odp_adw_ancillaries_n``
+         ``odp_adw_ancillaries_p`` + qa  -> ``odp_adw_ancillaries_i``
+         ``odp_adw_ancillaries_n`` + dev -> ``odp_adw_ancillaries_n`` (idempotent)
+         ``odp_adw_ancillaries_i`` + dev -> ``odp_adw_ancillaries_n`` (re-route)
+         ``foo`` (no known suffix)  + dev -> ``foo_n``
+
+    All three suffix values are configurable via env vars
+    (``DEVMIRROR_PROD_CATALOG_SUFFIX``, ``DEVMIRROR_QA_CATALOG_SUFFIX``,
+    ``DEVMIRROR_DEV_CATALOG_SUFFIX``).  Empty / whitespace values fall
+    back to the LH defaults; only a non-blank explicit override
+    replaces the default.
+
+    Recognition (what suffixes the function strips from a source name)
+    is separate from landing (where each env clones go).  By default the
+    recognition set is the union of the three landing suffixes; in
+    deployments where landing routes diverge from the source SDLC
+    convention (LH routes both dev and QA into ``_n``, so the landing
+    set is ``{_p, _n}`` -- but pre-prod sources still end in ``_i``),
+    set ``DEVMIRROR_KNOWN_CATALOG_SUFFIXES`` to the comma-separated
+    set of suffixes the engine should recognise on source catalogs
+    (e.g. ``_p,_i,_n`` for the LH SDLC convention).
     """
     import os
     override = os.environ.get("DEVMIRROR_TARGET_CATALOG", "").strip()
     if override:
         return override
-    if source_catalog.startswith("prod_"):
-        return source_catalog.replace("prod_", "dev_", 1)
-    if source_catalog.startswith("prod"):
-        return source_catalog.replace("prod", "dev", 1)
-    return f"{source_catalog}_{env}"
+    # Empty-string env vars fall through to the default -- bundle/app.yaml
+    # commonly use `value: ""` to mean "unset", and a missing suffix would
+    # silently produce a catalog name with no suffix at all.
+    prod_suffix = os.environ.get("DEVMIRROR_PROD_CATALOG_SUFFIX", "").strip() or "_p"
+    qa_suffix = os.environ.get("DEVMIRROR_QA_CATALOG_SUFFIX", "").strip() or "_i"
+    dev_suffix = os.environ.get("DEVMIRROR_DEV_CATALOG_SUFFIX", "").strip() or "_n"
+    # Recognition set: explicit DEVMIRROR_KNOWN_CATALOG_SUFFIXES wins if
+    # provided; otherwise fall back to the landing trio (= current behaviour).
+    known_env = os.environ.get("DEVMIRROR_KNOWN_CATALOG_SUFFIXES", "").strip()
+    if known_env:
+        known_suffixes: tuple[str, ...] = tuple(
+            s.strip() for s in known_env.split(",") if s.strip()
+        )
+    else:
+        known_suffixes = (prod_suffix, qa_suffix, dev_suffix)
+    base = source_catalog
+    for s in known_suffixes:
+        if base.endswith(s):
+            base = base[: -len(s)]
+            break
+    if env == "dev":
+        suffix = dev_suffix
+    elif env == "qa":
+        suffix = qa_suffix
+    else:
+        raise NamingError(
+            f"Unknown environment: {env!r}. Must be 'dev' or 'qa'."
+        )
+    return f"{base}{suffix}"

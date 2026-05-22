@@ -104,9 +104,9 @@ class TestDataRevision:
 
 
 class TestAccess:
-    def test_valid_with_qa(self) -> None:
-        a = Access(developers=["dev@co.com"], qa_users=["qa@co.com"])
-        assert a.qa_users == ["qa@co.com"]
+    def test_valid_with_uat(self) -> None:
+        a = Access(developers=["dev@co.com"], uat_users=["uat@co.com"])
+        assert a.uat_users == ["uat@co.com"]
 
     def test_empty_developers_rejected(self) -> None:
         with pytest.raises(ValidationError, match="at least 1"):

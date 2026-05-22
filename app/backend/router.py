@@ -13,7 +13,7 @@ from fastapi.responses import Response
 
 from devmirror.modify.modification_engine import _manage_users
 
-from .auth import UserInfo, get_user_role, require_owner_or_admin
+from .auth import UserInfo, get_user_role, require_admin, require_owner_or_admin
 from .config import get_current_user, get_db_client, get_settings, validate_dr_id
 from .helpers import (
     _auto_scan,
@@ -29,6 +29,8 @@ from .models import (
     ConfigIn,
     ConfigListResponse,
     ConfigOut,
+    RejectRequest,
+    RejectResponse,
     StreamSearchResponse,
     StreamSearchResult,
     ValidationResult,
@@ -185,7 +187,7 @@ def update_config(
 
     Phase 2: edits to sensitive fields on a provisioned DR are staged for
     admin approval (returns HTTP 202) instead of being applied immediately.
-    Sensitive fields are ``access.developers``, ``access.qa_users``, and
+    Sensitive fields are ``access.developers``, ``access.uat_users``, and
     ``additional_objects``. Non-sensitive edits remain immediate.
     """
     from .approvals import compute_diff, has_sensitive_change, stage_pending_edit
@@ -256,15 +258,15 @@ def update_config(
             old_config = _parse_config_in(existing["config_json"])
             old_devs = set(old_config.developers or [])
             new_devs = set(config_in.developers or [])
-            old_qa = set(old_config.qa_users or [])
-            new_qa = set(config_in.qa_users or [])
+            old_uat = set(old_config.uat_users or [])
+            new_uat = set(config_in.uat_users or [])
 
             added_devs = sorted(new_devs - old_devs)
             removed_devs = sorted(old_devs - new_devs)
-            added_qa = sorted(new_qa - old_qa)
-            removed_qa = sorted(old_qa - new_qa)
+            added_uat = sorted(new_uat - old_uat)
+            removed_uat = sorted(old_uat - new_uat)
 
-            if added_devs or removed_devs or added_qa or removed_qa:
+            if added_devs or removed_devs or added_uat or removed_uat:
                 _dr_repo, obj_repo, access_repo, audit_repo = _control_repos(settings)
 
                 if added_devs:
@@ -277,16 +279,24 @@ def update_config(
                         "remove_users", dr_id, removed_devs, "dev",
                         db_client, obj_repo, access_repo,
                     )
-                if added_qa:
-                    _manage_users(
-                        "add_users", dr_id, added_qa, "qa",
-                        db_client, obj_repo, access_repo,
-                    )
-                if removed_qa:
-                    _manage_users(
-                        "remove_users", dr_id, removed_qa, "qa",
-                        db_client, obj_repo, access_repo,
-                    )
+                # UAT users get SELECT on every provisioned env (dev + qa
+                # whenever QA was enabled).  `_manage_users` short-circuits
+                # cleanly on a no-schemas env, so calling it twice unconditionally
+                # is correct: dev-only DRs simply skip the qa pass.
+                if added_uat:
+                    for env in ("dev", "qa"):
+                        _manage_users(
+                            "add_users", dr_id, added_uat, env,
+                            db_client, obj_repo, access_repo,
+                            writable=False,
+                        )
+                if removed_uat:
+                    for env in ("dev", "qa"):
+                        _manage_users(
+                            "remove_users", dr_id, removed_uat, env,
+                            db_client, obj_repo, access_repo,
+                            writable=False,
+                        )
 
                 # Audit the diff
                 from devmirror.utils import now_iso
@@ -297,11 +307,11 @@ def update_config(
                         "before": sorted(old_devs),
                         "after": sorted(new_devs),
                     })
-                if added_qa or removed_qa:
+                if added_uat or removed_uat:
                     changes_audit.append({
-                        "field": "access.qa_users",
-                        "before": sorted(old_qa),
-                        "after": sorted(new_qa),
+                        "field": "access.uat_users",
+                        "before": sorted(old_uat),
+                        "after": sorted(new_uat),
                     })
                 audit_repo.append(
                     db_client,
@@ -355,6 +365,92 @@ def delete_config(
         )
     repo.delete(db_client, dr_id=dr_id)
     return Response(status_code=204)
+
+
+# ---- 5b. POST /api/configs/{dr_id}/reject (rejectConfig) ----------------
+
+@router.post(
+    "/configs/{dr_id}/reject",
+    response_model=RejectResponse,
+    operation_id="rejectConfig",
+)
+def reject_config(
+    body: RejectRequest,
+    dr_id: str = Depends(validate_dr_id),
+    _: None = Depends(require_admin),
+    db_client: DbClient = Depends(get_db_client),
+    settings: Settings = Depends(get_settings),
+    current_user: str = Depends(get_current_user),
+) -> RejectResponse:
+    """Admin-only: reject a submitted config with a comment.
+
+    Operates on the **config row** (`fastsetup_configs`) -- the row the
+    admin actually reviews on the Scan Results page.  Rejection is
+    terminal: a rejected config cannot be re-approved (the owner makes a
+    fresh DR addressing the feedback).  The mandatory comment surfaces
+    on the owner's config detail page so they know why.
+
+    Status transitions accepted: ``valid``, ``scanned`` -> ``rejected``.
+    Refused with 409: ``provisioned`` (already deployed -- use cleanup),
+    ``rejected`` (already terminal).
+    """
+    from datetime import UTC, datetime
+
+    repo = _get_repo(settings, db_client)
+    existing = repo.get(db_client, dr_id=dr_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Config {dr_id} not found")
+
+    current_status = (existing.get("status") or "").lower()
+    if current_status == "provisioned":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Config {dr_id} is already provisioned; use cleanup to "
+                "remove its infrastructure instead of rejecting."
+            ),
+        )
+    if current_status == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Config {dr_id} is already rejected.",
+        )
+
+    now = datetime.now(UTC).isoformat()
+    repo.reject(
+        db_client,
+        dr_id=dr_id,
+        comment=body.comment,
+        rejected_by=current_user,
+        rejected_at=now,
+    )
+
+    # Audit row -- mirrors the other admin actions so the rejection lands
+    # in audit_log alongside the lifecycle events.  Audit failure must not
+    # roll back the rejection (the config row is already updated).
+    try:
+        _, _, _, audit_repo = _control_repos(settings)
+        audit_repo.append(
+            db_client,
+            dr_id=dr_id,
+            action="REJECT",
+            performed_by=current_user,
+            performed_at=now,
+            status="SUCCESS",
+            action_detail=json.dumps({"comment": body.comment}),
+        )
+    except Exception:
+        logger.warning(
+            "Audit row append failed for REJECT of %s", dr_id, exc_info=True,
+        )
+
+    return RejectResponse(
+        dr_id=dr_id,
+        status="rejected",
+        rejection_comment=body.comment,
+        rejected_by=current_user,
+        rejected_at=now,
+    )
 
 
 # ---- 6. POST /api/configs/{dr_id}/validate (revalidateConfig) -----------

@@ -16,6 +16,8 @@ import type {
   DrListResponse,
   CleanupResponse,
   RefreshStartResponse,
+  RejectRequest,
+  RejectResponse,
   ModifyDrRequest,
   ModifyDrResponse,
   PendingEditsResponse,
@@ -197,6 +199,20 @@ export async function cleanupDr(drId: string): Promise<CleanupResponse> {
   return request<CleanupResponse>(
     `${BASE}/drs/${encodeURIComponent(drId)}/cleanup`,
     { method: 'POST' },
+  );
+}
+
+export async function rejectConfig(
+  drId: string,
+  body: RejectRequest,
+): Promise<RejectResponse> {
+  return request<RejectResponse>(
+    `${BASE}/configs/${encodeURIComponent(drId)}/reject`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
   );
 }
 

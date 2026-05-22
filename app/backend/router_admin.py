@@ -185,13 +185,13 @@ def approve_edit(
     # Compute deltas to drive grant/revoke
     old_devs = set(old_dict.get("developers") or [])
     new_devs = set(new_dict.get("developers") or [])
-    old_qa = set(old_dict.get("qa_users") or [])
-    new_qa = set(new_dict.get("qa_users") or [])
+    old_uat = set(old_dict.get("uat_users") or [])
+    new_uat = set(new_dict.get("uat_users") or [])
 
     added_devs = sorted(new_devs - old_devs)
     removed_devs = sorted(old_devs - new_devs)
-    added_qa = sorted(new_qa - old_qa)
-    removed_qa = sorted(old_qa - new_qa)
+    added_uat = sorted(new_uat - old_uat)
+    removed_uat = sorted(old_uat - new_uat)
 
     # Persist the new config row
     config_in = ConfigIn.model_validate(new_dict)
@@ -218,16 +218,23 @@ def approve_edit(
                 "remove_users", dr_id, removed_devs, "dev",
                 db_client, obj_repo, access_repo,
             )
-        if added_qa:
-            _manage_users(
-                "add_users", dr_id, added_qa, "qa",
-                db_client, obj_repo, access_repo,
-            )
-        if removed_qa:
-            _manage_users(
-                "remove_users", dr_id, removed_qa, "qa",
-                db_client, obj_repo, access_repo,
-            )
+        # UAT users get SELECT on every provisioned env (dev + qa when QA
+        # was enabled).  _manage_users short-circuits cleanly on a no-schemas
+        # env, so calling for both is safe for dev-only DRs.
+        if added_uat:
+            for env in ("dev", "qa"):
+                _manage_users(
+                    "add_users", dr_id, added_uat, env,
+                    db_client, obj_repo, access_repo,
+                    writable=False,
+                )
+        if removed_uat:
+            for env in ("dev", "qa"):
+                _manage_users(
+                    "remove_users", dr_id, removed_uat, env,
+                    db_client, obj_repo, access_repo,
+                    writable=False,
+                )
     except Exception as exc:
         # Use logger.error (no exc_info) so the proposed config payload in
         # local frame variables doesn't end up in the stack trace logs.

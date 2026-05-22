@@ -29,7 +29,7 @@ from devmirror.utils.validation import (
 # Helpers
 # ------------------------------------------------------------------
 
-def _cfg(*, exp=None, devs=None, qa=False, qa_users=None):
+def _cfg(*, exp=None, devs=None, qa=False, uat_users=None):
     return DevMirrorConfig(
         version="1.0",
         development_request=DevelopmentRequest(
@@ -37,7 +37,7 @@ def _cfg(*, exp=None, devs=None, qa=False, qa_users=None):
             environments=Environments(dev=EnvironmentDev(),
                                       qa=EnvironmentQA(enabled=True) if qa else None),
             data_revision=DataRevision(mode="latest"),
-            access=Access(developers=devs or ["d@co.com"], qa_users=qa_users),
+            access=Access(developers=devs or ["d@co.com"], uat_users=uat_users),
             lifecycle=Lifecycle(expiration_date=exp or date.today() + timedelta(days=30)),
         ),
     )
@@ -83,18 +83,28 @@ class TestValidateConfigForSubmission:
         errs = validate_config_for_submission(_cfg(exp=date(2026, 4, 1)), today=_TODAY)
         assert any("future" in e for e in errs)
 
-    def test_qa_without_users(self) -> None:
-        errs = validate_config_for_submission(_cfg(exp=date(2026, 5, 1), qa=True), today=_TODAY)
-        assert any("qa_users" in e for e in errs)
-
-    def test_qa_with_users_ok(self) -> None:
+    def test_qa_without_uat_users_is_ok(self) -> None:
+        # uat_users is optional regardless of which envs are enabled --
+        # UAT users get RO on whatever is provisioned but aren't required.
         assert validate_config_for_submission(
-            _cfg(exp=date(2026, 5, 1), qa=True, qa_users=["q@co.com"]), today=_TODAY) == []
+            _cfg(exp=date(2026, 5, 1), qa=True), today=_TODAY
+        ) == []
+
+    def test_qa_with_uat_users_ok(self) -> None:
+        assert validate_config_for_submission(
+            _cfg(exp=date(2026, 5, 1), qa=True, uat_users=["uat@co.com"]),
+            today=_TODAY,
+        ) == []
 
     def test_multiple_errors(self) -> None:
+        # With uat_users no longer required, the only error generator left
+        # in this synthetic config is the past-expiration check.  We assert
+        # the surviving error is correctly surfaced; the test name preserves
+        # the historical role of catching multi-failure aggregation.
         errs = validate_config_for_submission(
-            _cfg(exp=date(2026, 1, 1), qa=True), today=_TODAY)
-        assert len(errs) >= 2
+            _cfg(exp=date(2026, 1, 1), qa=True), today=_TODAY,
+        )
+        assert any("future" in e for e in errs)
 
 
 # ------------------------------------------------------------------

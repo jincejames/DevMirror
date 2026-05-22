@@ -6,7 +6,7 @@
 # `app/dist/`.  Pinned to the exact wheel filename because pip's
 # requirements.txt format does not accept wildcards -- bump this line
 # in lockstep with `pyproject.toml`'s `version =` field.
-./dist/devmirror-0.2.3-py3-none-any.whl
+./dist/devmirror-0.2.9-py3-none-any.whl
 
 fastapi==0.135.3
 uvicorn[standard]==0.44.0

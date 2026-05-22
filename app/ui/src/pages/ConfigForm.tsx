@@ -28,7 +28,7 @@ const EMPTY_FORM: ConfigIn = {
   data_revision_version: null,
   data_revision_timestamp: null,
   developers: [],
-  qa_users: [],
+  uat_users: [],
   expiration_date: '',
   notification_days_before: 7,
   notification_recipients: [],
@@ -57,8 +57,15 @@ export default function ConfigForm() {
   const [reprovisioning, setReprovisioning] = useState(false);
   const [savedBanner, setSavedBanner] = useState(false);
   const [createdBy, setCreatedBy] = useState('');
+  // Rejection metadata is surfaced when status === 'rejected' (admin
+  // turned the request down on the Scan Results page).  The owner sees
+  // the rationale here on their config detail view.
+  const [rejectionComment, setRejectionComment] = useState<string | null>(null);
+  const [rejectedBy, setRejectedBy] = useState<string | null>(null);
+  const [rejectedAt, setRejectedAt] = useState<string | null>(null);
 
   const isProvisioned = status === 'provisioned';
+  const isRejected = status === 'rejected';
 
   useEffect(() => {
     if (!isEdit || !drId) return;
@@ -71,11 +78,14 @@ export default function ConfigForm() {
           streams: out.config.streams ?? [],
           additional_objects: loadedAdditional,
           developers: out.config.developers ?? [],
-          qa_users: out.config.qa_users ?? [],
+          uat_users: out.config.uat_users ?? [],
           notification_recipients: out.config.notification_recipients ?? [],
         });
         setAdditionalObjectsText(loadedAdditional.join('\n'));
         setCreatedBy(out.created_by ?? '');
+        setRejectionComment(out.rejection_comment ?? null);
+        setRejectedBy(out.rejected_by ?? null);
+        setRejectedAt(out.rejected_at ?? null);
         setErrors(out.validation_errors);
         setStatus(out.status);
         setIsValid(out.status === 'valid' || out.status === 'provisioned');
@@ -107,15 +117,37 @@ export default function ConfigForm() {
     setSaving(true);
     setShowBanner(false);
     setSavedBanner(false);
+
+    // Client-side description guard.  The server enforces the same rule
+    // (min 5 non-blank chars) but checking here gives instant inline
+    // feedback and avoids a round-trip on the obvious case.  Whitespace
+    // is stripped before length check.
+    const descTrimmed = (form.description ?? '').trim();
+    if (descTrimmed.length < 5) {
+      setErrors([{
+        loc: ['description'],
+        msg: descTrimmed.length === 0
+          ? 'Description is required.'
+          : 'Description must be at least 5 characters.',
+      }]);
+      setShowBanner(true);
+      setSaving(false);
+      return;
+    }
+
     try {
       const payload: ConfigIn = {
         ...form,
+        description: descTrimmed,
         additional_objects:
           form.additional_objects && form.additional_objects.length > 0
             ? form.additional_objects
             : null,
-        qa_users: form.qa_enabled && form.qa_users && form.qa_users.length > 0
-          ? form.qa_users
+        // UAT users are independent of the qa_enabled toggle: they get
+        // SELECT on whatever copies are provisioned (dev + qa when both,
+        // dev only when only dev), so the field is always relevant.
+        uat_users: form.uat_users && form.uat_users.length > 0
+          ? form.uat_users
           : null,
         notification_recipients:
           form.notification_recipients && form.notification_recipients.length > 0
@@ -248,8 +280,11 @@ export default function ConfigForm() {
           form.additional_objects && form.additional_objects.length > 0
             ? form.additional_objects
             : null,
-        qa_users: form.qa_enabled && form.qa_users && form.qa_users.length > 0
-          ? form.qa_users
+        // UAT users are independent of the qa_enabled toggle: they get
+        // SELECT on whatever copies are provisioned (dev + qa when both,
+        // dev only when only dev), so the field is always relevant.
+        uat_users: form.uat_users && form.uat_users.length > 0
+          ? form.uat_users
           : null,
         notification_recipients:
           form.notification_recipients && form.notification_recipients.length > 0
@@ -321,6 +356,26 @@ export default function ConfigForm() {
         <div className="owner-label">Owner: {createdBy}</div>
       )}
 
+      {isRejected && rejectionComment && (
+        <div className="banner banner-error">
+          <strong>This request was rejected.</strong>{' '}
+          {rejectedBy && (
+            <>
+              {rejectedBy}
+              {rejectedAt && ` on ${rejectedAt}`}
+              {' '}wrote:
+            </>
+          )}
+          <div style={{ marginTop: '0.5em', fontStyle: 'italic' }}>
+            &ldquo;{rejectionComment}&rdquo;
+          </div>
+          <small>
+            Edit the request below to address the feedback and re-save to
+            re-submit for review.
+          </small>
+        </div>
+      )}
+
       {isProvisioned && (
         <div className="banner banner-warning">
           This config is already provisioned. Saving will update the config but not the live objects.
@@ -350,14 +405,17 @@ export default function ConfigForm() {
             </div>
           )}
           <div className="form-field">
-            <label htmlFor="description">Description</label>
+            <label htmlFor="description">Description (required)</label>
             <textarea
               id="description"
               value={form.description ?? ''}
-              onChange={(e) => set('description', e.target.value || null)}
+              onChange={(e) => set('description', e.target.value)}
               rows={3}
+              required
+              minLength={5}
               className={fieldClass('description')}
             />
+            <small>Minimum 5 characters, non-blank.</small>
             {fieldError('description') && <span className="field-error-msg">{fieldError('description')}</span>}
           </div>
         </fieldset>
@@ -461,18 +519,21 @@ export default function ConfigForm() {
             />
             {fieldError('developers') && <span className="field-error-msg">{fieldError('developers')}</span>}
           </div>
-          {form.qa_enabled && (
-            <div className="form-field">
-              <label>QA Users</label>
-              <MultiInput
-                values={form.qa_users ?? []}
-                onChange={(val) => set('qa_users', val)}
-                placeholder="qa-user@example.com or group-name"
-                disabled={false}
-              />
-              {fieldError('qa_users') && <span className="field-error-msg">{fieldError('qa_users')}</span>}
-            </div>
-          )}
+          <div className="form-field">
+            <label>UAT Users (optional)</label>
+            <MultiInput
+              values={form.uat_users ?? []}
+              onChange={(val) => set('uat_users', val)}
+              placeholder="uat-user@example.com or group-name"
+              disabled={false}
+            />
+            {fieldError('uat_users') && <span className="field-error-msg">{fieldError('uat_users')}</span>}
+            <small>
+              Optional. UAT users get SELECT (read-only) on whichever
+              copies get provisioned: dev only if QA is disabled, both dev
+              and QA when QA is enabled.
+            </small>
+          </div>
         </fieldset>
 
         {/* Section 6: Lifecycle */}

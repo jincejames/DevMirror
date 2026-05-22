@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "devmirror"
-version = "0.2.3"
+version = "0.2.9"
 description = "Automates cloning and lifecycle management of production Unity Catalog objects into isolated development environments."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11,<3.14"
-authors = [{ name = "DevMirror Team" }]
+authors = [{ name = "FastSetup Team" }]
 
 dependencies = [
     "pydantic>=2.0,<3.0",

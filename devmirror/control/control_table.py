@@ -23,13 +23,24 @@ def _param_or_null(params: dict[str, str | None], key: str, value: Any) -> str:
 
 
 def _load_ddl_template() -> str:
-    """Load the raw DDL SQL template from the migrations package."""
-    ref = importlib_resources.files("devmirror.migrations").joinpath("001_control_tables.sql")
-    return ref.read_text(encoding="utf-8")
+    """Load and concatenate every `.sql` migration in the migrations package
+    so that ``apply_control_ddl()`` provisions the full control plane on
+    first request.  Migrations are concatenated in lexicographic filename
+    order (matching ``scripts/bootstrap_env.sh``'s ``sorted()`` traversal),
+    which keeps 001 -> 002 -> 003 ordering and is what the bundled SQL
+    files were written to assume.
+    """
+    mig_dir = importlib_resources.files("devmirror.migrations")
+    parts: list[str] = []
+    for entry in sorted(mig_dir.iterdir(), key=lambda r: r.name):
+        if entry.name.endswith(".sql"):
+            parts.append(entry.read_text(encoding="utf-8"))
+    return "\n".join(parts)
 
 
 def render_ddl(control_catalog: str, control_schema: str) -> list[str]:
-    """Render the DDL template into individual SQL statements."""
+    """Render the DDL templates (every migration in
+    ``devmirror.migrations``) into individual SQL statements."""
     raw = _load_ddl_template()
     rendered = raw.replace("{control_catalog}", control_catalog).replace(
         "{control_schema}", control_schema
@@ -60,11 +71,28 @@ def render_ddl(control_catalog: str, control_schema: str) -> list[str]:
 
 
 def apply_control_ddl(db_client: _DbClient, settings: Settings) -> list[str]:
-    """Apply all control table DDL statements idempotently."""
+    """Apply all control table DDL statements idempotently, best-effort.
+
+    Each statement is wrapped so a single failure (e.g. ``ALTER TABLE ADD
+    COLUMNS`` re-run after columns already exist) does NOT abort the rest
+    of the bootstrap.  Failures are logged as warnings; the returned list
+    contains only the statements that actually succeeded.
+    """
+    import logging as _logging
+    log = _logging.getLogger(__name__)
     statements = render_ddl(settings.control_catalog, settings.control_schema)
+    applied: list[str] = []
     for stmt in statements:
-        db_client.sql_exec(stmt)
-    return statements
+        try:
+            db_client.sql_exec(stmt)
+            applied.append(stmt)
+        except Exception as exc:
+            preview = " ".join(stmt.split())[:120]
+            log.warning(
+                "Control DDL statement skipped (continuing): %s -- %s",
+                preview, str(exc)[:200],
+            )
+    return applied
 
 
 class DRStatus(StrEnum):
@@ -78,6 +106,11 @@ class DRStatus(StrEnum):
     CLEANUP_IN_PROGRESS = "CLEANUP_IN_PROGRESS"
     CLEANED_UP = "CLEANED_UP"
     FAILED = "FAILED"
+    # Admin-rejected before provisioning ever started.  Terminal -- no further
+    # transitions allowed.  Rejection rationale is stored alongside the row
+    # in `rejection_comment`/`rejected_by`/`rejected_at` so the owner can
+    # see why their request was turned down.
+    REJECTED = "REJECTED"
 
 
 class ObjectStatus(StrEnum):
@@ -94,7 +127,9 @@ class StatusTransitionError(Exception):
 
 
 _DR_TRANSITIONS: dict[DRStatus, frozenset[DRStatus]] = {
-    DRStatus.PENDING_REVIEW: frozenset({DRStatus.PROVISIONING, DRStatus.FAILED}),
+    DRStatus.PENDING_REVIEW: frozenset(
+        {DRStatus.PROVISIONING, DRStatus.FAILED, DRStatus.REJECTED}
+    ),
     DRStatus.PROVISIONING: frozenset({DRStatus.ACTIVE, DRStatus.FAILED}),
     DRStatus.ACTIVE: frozenset(
         {
@@ -117,6 +152,10 @@ _DR_TRANSITIONS: dict[DRStatus, frozenset[DRStatus]] = {
     DRStatus.FAILED: frozenset(
         {DRStatus.PROVISIONING, DRStatus.ACTIVE, DRStatus.CLEANUP_IN_PROGRESS}
     ),
+    # REJECTED is terminal -- no infrastructure was ever provisioned, so
+    # there's nothing to clean up.  Owner who wants to retry creates a
+    # fresh DR.
+    DRStatus.REJECTED: frozenset(),
 }
 
 _OBJECT_TRANSITIONS: dict[ObjectStatus, frozenset[ObjectStatus]] = {
@@ -292,6 +331,46 @@ class DRRepository:
         params: dict[str, str | None] = {
             "dr_id": dr_id,
             "notification_sent_at": notification_sent_at,
+        }
+        db_client.sql_exec_with_params(sql, params)
+        return sql
+
+    def reject(
+        self,
+        db_client: Any,
+        *,
+        dr_id: str,
+        current_status: DRStatus,
+        comment: str,
+        rejected_by: str,
+        rejected_at: str,
+    ) -> str:
+        """Mark a pending DR as REJECTED with the admin's comment.
+
+        Validates the transition (only ``PENDING_REVIEW`` is allowed today),
+        then writes status + the three rejection metadata columns in a
+        single UPDATE.  The owner sees ``rejection_comment`` on the DR
+        status page so they know why their request was turned down.
+        """
+        validate_dr_status_transition(current_status, DRStatus.REJECTED)
+        sql = (
+            f"UPDATE {self._table} SET "
+            "status = :new_status, "
+            "rejection_comment = :rejection_comment, "
+            "rejected_by = :rejected_by, "
+            "rejected_at = :rejected_at, "
+            "last_modified_at = :last_modified_at "
+            "WHERE dr_id = :dr_id "
+            "AND status = :current_status"
+        )
+        params: dict[str, str | None] = {
+            "dr_id": dr_id,
+            "new_status": DRStatus.REJECTED.value,
+            "current_status": current_status.value,
+            "rejection_comment": comment,
+            "rejected_by": rejected_by,
+            "rejected_at": rejected_at,
+            "last_modified_at": rejected_at,
         }
         db_client.sql_exec_with_params(sql, params)
         return sql

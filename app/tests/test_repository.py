@@ -128,6 +128,33 @@ class TestUpdate:
         assert params["description"] == "Updated"
 
 
+class TestReject:
+    def test_reject_writes_status_and_rejection_columns(self, repo, mock_db):
+        repo.reject(
+            mock_db,
+            dr_id="DR-100",
+            comment="Doesn't follow naming convention",
+            rejected_by="admin@example.com",
+            rejected_at="2026-05-22T10:00:00Z",
+        )
+        mock_db.sql_exec_with_params.assert_called_once()
+        sql = mock_db.sql_exec_with_params.call_args[0][0]
+        params = mock_db.sql_exec_with_params.call_args[0][1]
+        # SQL hits all four columns + WHERE clause.
+        assert "UPDATE test_catalog.test_schema.fastsetup_configs" in sql
+        assert "status = 'rejected'" in sql
+        assert "rejection_comment = :rejection_comment" in sql
+        assert "rejected_by = :rejected_by" in sql
+        assert "rejected_at = :rejected_at" in sql
+        assert "WHERE dr_id = :dr_id" in sql
+        assert params == {
+            "dr_id": "DR-100",
+            "rejection_comment": "Doesn't follow naming convention",
+            "rejected_by": "admin@example.com",
+            "rejected_at": "2026-05-22T10:00:00Z",
+        }
+
+
 class TestDelete:
     def test_delete_succeeds(self, repo, mock_db):
         mock_db.sql.return_value = [{"dr_id": "DR-100", "status": "valid"}]

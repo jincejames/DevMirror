@@ -76,15 +76,9 @@ def validate_config_for_submission(
     if not dr.access.developers:
         errors.append("At least one developer must be specified in access.developers.")
 
-    # QA users should be specified if QA env is enabled
-    if (
-        dr.environments.qa is not None
-        and dr.environments.qa.enabled
-        and (dr.access.qa_users is None or len(dr.access.qa_users) == 0)
-    ):
-        errors.append(
-            "QA environment is enabled but no qa_users are specified in access.qa_users."
-        )
+    # uat_users is now optional regardless of which envs are enabled; UAT users
+    # simply get SELECT on whatever was provisioned.  No additional validation
+    # needed beyond the per-entry non-blank check in the Pydantic model.
 
     return errors
 

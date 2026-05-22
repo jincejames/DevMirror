@@ -18,8 +18,19 @@ CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_developm
     expiration_date      DATE        NOT NULL,
     last_refreshed_at    TIMESTAMP,
     last_modified_at     TIMESTAMP,
-    notification_sent_at TIMESTAMP
+    notification_sent_at TIMESTAMP,
+    rejection_comment    STRING,
+    rejected_by          STRING,
+    rejected_at          TIMESTAMP
 );
+
+-- Forward-compat: in-place migration for deployments whose
+-- fastsetup_development_requests was created before the rejection columns
+-- existed.  ALTER fails on second run because Databricks SQL doesn't
+-- support `ADD COLUMNS IF NOT EXISTS`; `apply_control_ddl` swallows the
+-- per-statement error and keeps going.  Safe to leave in place forever.
+ALTER TABLE {control_catalog}.{control_schema}.fastsetup_development_requests
+  ADD COLUMNS (rejection_comment STRING, rejected_by STRING, rejected_at TIMESTAMP);
 
 -- 2. DR Objects
 CREATE TABLE IF NOT EXISTS {control_catalog}.{control_schema}.fastsetup_dr_objects (

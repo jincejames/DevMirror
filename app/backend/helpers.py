@@ -113,8 +113,19 @@ def _build_yaml(config_in: ConfigIn) -> str:
 
 
 def _parse_config_in(config_json: str) -> ConfigIn:
-    """Parse a stored config_json string back into a ConfigIn."""
-    return ConfigIn.model_validate_json(config_json)
+    """Parse a stored config_json string back into a ConfigIn.
+
+    Legacy rows that pre-date the mandatory-description rule may have
+    ``description: null`` or a sub-5-char value persisted.  Substitute a
+    placeholder on the way out so reads keep working; submissions still
+    go through the strict ConfigIn validators (this helper isn't on the
+    write path).
+    """
+    raw = json.loads(config_json)
+    desc = raw.get("description")
+    if not isinstance(desc, str) or len(desc.strip()) < 5:
+        raw["description"] = "(legacy entry -- please update description)"
+    return ConfigIn.model_validate(raw)
 
 
 def _field_errors_from_validation_error(exc: ValidationError) -> list[FieldError]:
@@ -149,6 +160,9 @@ def _row_to_config_out(row: dict) -> ConfigOut:
         created_by=row["created_by"],
         updated_at=row.get("updated_at"),
         expiration_date=row["expiration_date"],
+        rejection_comment=row.get("rejection_comment"),
+        rejected_by=row.get("rejected_by"),
+        rejected_at=row.get("rejected_at"),
     )
 
 

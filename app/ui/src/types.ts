@@ -9,7 +9,11 @@ export interface UserInfo {
 export interface ConfigIn {
   // US-34: dr_id is server-assigned on create; optional in client payloads.
   dr_id?: string | null;
-  description?: string | null;
+  // Required (>= 5 non-blank chars) -- the API rejects missing / short
+  // descriptions with a 422 and the form blocks submit with an inline
+  // error.  ConfigOut / ConfigListItem still allow null because legacy
+  // rows written before the rule may have NULL stored.
+  description: string;
   streams: string[];
   additional_objects?: string[] | null;
   target_catalog?: string | null;
@@ -18,7 +22,7 @@ export interface ConfigIn {
   data_revision_version?: number | null;
   data_revision_timestamp?: string | null;
   developers: string[];
-  qa_users?: string[] | null;
+  uat_users?: string[] | null;
   expiration_date: string;
   notification_days_before: number;
   notification_recipients?: string[] | null;
@@ -44,6 +48,11 @@ export interface ConfigOut {
   created_by: string;
   updated_at: string | null;
   expiration_date: string;
+  // Populated only when status === 'rejected'; surfaces the admin's
+  // rationale to the owner in the UI banner.
+  rejection_comment?: string | null;
+  rejected_by?: string | null;
+  rejected_at?: string | null;
 }
 
 export interface ConfigListItem {
@@ -130,13 +139,27 @@ export interface DrStatusResponse {
   status: string;
   description: string | null;
   expiration_date: string;
-  created_at: string;
+  // `created_by` is the canonical owner -- whoever submitted the
+  // underlying config -- reconciled from the config row at response time.
   created_by: string;
+  created_at: string;
   last_refreshed_at: string | null;
   objects: DrObject[];
   total_objects: number;
   object_breakdown: Record<string, number>;
   recent_audit: AuditEntry[];
+}
+
+export interface RejectRequest {
+  comment: string;
+}
+
+export interface RejectResponse {
+  dr_id: string;
+  status: string;
+  rejection_comment: string;
+  rejected_by: string;
+  rejected_at: string;
 }
 
 export interface DrObject {
@@ -177,12 +200,20 @@ export interface DrListResponse {
   total: number;
 }
 
+export interface CleanupFailure {
+  fqn: string;
+  error: string;
+}
+
 export interface CleanupResponse {
   dr_id: string;
   final_status: string;
   objects_dropped: number;
   schemas_dropped: number;
   revokes_succeeded: number;
+  objects_failed: CleanupFailure[];
+  schemas_failed: CleanupFailure[];
+  revokes_failed: CleanupFailure[];
 }
 
 export interface RefreshStartResponse {
@@ -196,8 +227,8 @@ export interface ModifyDrRequest {
   new_expiration_date?: string | null;
   add_developers?: string[] | null;
   remove_developers?: string[] | null;
-  add_qa_users?: string[] | null;
-  remove_qa_users?: string[] | null;
+  add_uat_users?: string[] | null;
+  remove_uat_users?: string[] | null;
 }
 
 export interface ModifyDrResponse {

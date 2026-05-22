@@ -76,7 +76,7 @@ class DataRevision(BaseModel):
 class Access(BaseModel):
     """Access control: who gets access to dev and qa environments.
 
-    Each entry in ``developers`` and ``qa_users`` may be:
+    Each entry in ``developers`` and ``uat_users`` may be:
       - a user email (``alice@company.com``),
       - a Databricks account group name (``data-engineers``), or
       - a service principal application ID (UUID).
@@ -84,10 +84,17 @@ class Access(BaseModel):
     The string is passed unchanged to ``WorkspaceClient().grants.update()`` and
     resolved server-side, so mixing users, groups, and service principals in
     the same list is supported.
+
+    Grant matrix:
+      - developers -> read/write on EVERY provisioned env (dev and qa).
+      - uat_users  -> read-only (SELECT) on EVERY provisioned env.  Replaces
+        the old ``qa_users`` field that was only granted on qa; UAT users
+        now see whatever was provisioned regardless of whether qa was
+        requested.  Optional.
     """
 
     developers: list[str] = Field(..., min_length=1)
-    qa_users: list[str] | None = None
+    uat_users: list[str] | None = None
 
     @field_validator("developers")
     @classmethod

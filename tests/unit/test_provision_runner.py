@@ -47,7 +47,7 @@ def _cfg(dr_id="DR-1042", qa=False, rev_mode="latest", rev_ver=None, rev_ts=None
             data_revision=DataRevision(mode=rev_mode, version=rev_ver, timestamp=rev_ts),
             access=Access(
                 developers=["dev@company.com"],
-                qa_users=["qa@company.com"] if qa else None,
+                uat_users=["uat@company.com"] if qa else None,
             ),
             lifecycle=Lifecycle(expiration_date="2099-12-31"),
         ),
@@ -307,19 +307,23 @@ class TestProvisionDr:
         rows = acc.bulk_insert.call_args[1]["rows"]
         envs = {r["environment"] for r in rows}
         assert envs == {"dev", "qa"}
-        # Grant matrix: developer (dev@company.com) has RW in BOTH dev and
-        # qa rows; qa user (qa@company.com) has READ_ONLY in qa.
+        # Grant matrix:
+        #   developer (dev@company.com)   -> RW on BOTH dev and qa
+        #   UAT user  (uat@company.com)   -> RO on BOTH dev and qa
         by_principal = {
             (r["user_email"], r["environment"]): r["access_level"]
             for r in rows
         }
         assert by_principal[("dev@company.com", "dev")] == "READ_WRITE"
         assert by_principal[("dev@company.com", "qa")] == "READ_WRITE"
-        assert by_principal[("qa@company.com", "qa")] == "READ_ONLY"
+        assert by_principal[("uat@company.com", "dev")] == "READ_ONLY"
+        assert by_principal[("uat@company.com", "qa")] == "READ_ONLY"
 
-    def test_qa_grants_developers_rw_and_qa_users_ro(self) -> None:
-        """End-to-end grant matrix: developer principal gets MODIFY on
-        QA schema + WRITE_VOLUME on QA volume; qa_user gets neither.
+    def test_uat_users_get_select_only_on_every_env(self) -> None:
+        """End-to-end grant matrix at the UC API level:
+
+        - Developer gets MODIFY on dev AND qa schemas.
+        - UAT user gets SELECT but NOT MODIFY on BOTH dev and qa schemas.
         """
         from databricks.sdk.service.catalog import Privilege, SecurableType
 
@@ -345,23 +349,34 @@ class TestProvisionDr:
             if sec_type == SecurableType.SCHEMA:
                 schema_grants.setdefault((fqn, principal), set()).update(privs)
 
+        dev_schema = "prod_analytics_n.dr_1042_customers"
         qa_schema = "prod_analytics_i.qa_1042_customers"
-        # Developer must have MODIFY on the QA schema.
+        # Developer: MODIFY on both envs.
+        assert Privilege.MODIFY in schema_grants.get(
+            (dev_schema, "dev@company.com"), set(),
+        )
         assert Privilege.MODIFY in schema_grants.get(
             (qa_schema, "dev@company.com"), set(),
         )
-        # QA user must NOT have MODIFY on the QA schema.
-        assert Privilege.MODIFY not in schema_grants.get(
-            (qa_schema, "qa@company.com"), set(),
-        )
-        # QA user still has SELECT (read access).
+        # UAT user: SELECT on both envs, MODIFY on neither.
         assert Privilege.SELECT in schema_grants.get(
-            (qa_schema, "qa@company.com"), set(),
+            (dev_schema, "uat@company.com"), set(),
+        )
+        assert Privilege.SELECT in schema_grants.get(
+            (qa_schema, "uat@company.com"), set(),
+        )
+        assert Privilege.MODIFY not in schema_grants.get(
+            (dev_schema, "uat@company.com"), set(),
+        )
+        assert Privilege.MODIFY not in schema_grants.get(
+            (qa_schema, "uat@company.com"), set(),
         )
 
-    def test_qa_user_also_developer_not_duplicated(self) -> None:
-        """If alice@ is in both developers and qa_users, the QA-user RO
-        pass skips her -- she already has RW from the developer pass."""
+    def test_uat_user_also_developer_not_duplicated(self) -> None:
+        """If alice@ is in BOTH developers and uat_users, the UAT-user RO
+        pass skips her on every env -- she already has RW from the
+        developer pass.  Verifies the principal dedup contract is the same
+        as the legacy qa_users behaviour, just applied to all envs."""
         from devmirror.config.schema import (
             Access,
             DataRevision,
@@ -392,7 +407,7 @@ class TestProvisionDr:
                 data_revision=DataRevision(mode="latest"),
                 access=Access(
                     developers=["alice@company.com"],
-                    qa_users=["alice@company.com"],   # same person in both
+                    uat_users=["alice@company.com"],   # same person in both
                 ),
                 lifecycle=Lifecycle(expiration_date="2099-12-31"),
             ),
@@ -406,22 +421,24 @@ class TestProvisionDr:
         (result, _dr, _obj, acc, _aud) = _provision(config=cfg, db=db)
         assert result.final_status == "ACTIVE"
 
-        # access_rows must NOT duplicate alice's qa entry -- exactly one
-        # row per (email, env), and the qa one is READ_WRITE (developer
-        # pass wins).
+        # access_rows must NOT duplicate alice in either env: exactly one
+        # row per env and both are READ_WRITE (developer pass wins).
         rows = acc.bulk_insert.call_args[1]["rows"]
-        alice_qa = [
-            r for r in rows
-            if r["user_email"] == "alice@company.com"
-            and r["environment"] == "qa"
-        ]
-        assert len(alice_qa) == 1
-        assert alice_qa[0]["access_level"] == "READ_WRITE"
+        for env in ("dev", "qa"):
+            alice_rows = [
+                r for r in rows
+                if r["user_email"] == "alice@company.com"
+                and r["environment"] == env
+            ]
+            assert len(alice_rows) == 1
+            assert alice_rows[0]["access_level"] == "READ_WRITE"
 
-    def test_volume_grants_dev_rw_and_qa_readonly(self, monkeypatch) -> None:
+    def test_volume_grants_dev_rw_and_uat_readonly(self, monkeypatch) -> None:
         # Enable the import-schema feature and verify volume grants:
-        #   dev volume -> developer principals get READ_VOLUME + WRITE_VOLUME
-        #   qa volume  -> qa principals get READ_VOLUME only
+        #   dev volume -> developer  RW (READ_VOLUME + WRITE_VOLUME)
+        #   dev volume -> UAT user   RO (READ_VOLUME only)
+        #   qa volume  -> developer  RW
+        #   qa volume  -> UAT user   RO
         from databricks.sdk.service.catalog import Privilege, SecurableType
 
         from devmirror.provision.access_manager import (
@@ -451,17 +468,22 @@ class TestProvisionDr:
             if sec_type == SecurableType.VOLUME:
                 vol_grants.setdefault((fqn, principal), set()).update(privs)
 
-        # Dev volume: developer should have BOTH READ and WRITE.
         dev_vol = "prod_analytics_n.dr_1042_import_main.main_volume"
+        qa_vol = "prod_analytics_i.qa_1042_import_main.main_volume"
+        # Developer: READ + WRITE on both env volumes.
         assert vol_grants[(dev_vol, "dev@company.com")] == {
             Privilege.READ_VOLUME, Privilege.WRITE_VOLUME,
         }
-        # QA volume: QA user should have READ only (no WRITE).
-        # Default QA catalog suffix is `_i` (LH overrides to `_n` via env;
-        # not set here, so default applies).
-        qa_vol = "prod_analytics_i.qa_1042_import_main.main_volume"
-        assert vol_grants[(qa_vol, "qa@company.com")] == {Privilege.READ_VOLUME}
-        assert Privilege.WRITE_VOLUME not in vol_grants[(qa_vol, "qa@company.com")]
+        assert vol_grants[(qa_vol, "dev@company.com")] == {
+            Privilege.READ_VOLUME, Privilege.WRITE_VOLUME,
+        }
+        # UAT user: READ only on both env volumes.  (Default QA catalog
+        # suffix is `_i`; LH overrides to `_n` via env in production but
+        # we don't set that here, so the default applies.)
+        assert vol_grants[(dev_vol, "uat@company.com")] == {Privilege.READ_VOLUME}
+        assert vol_grants[(qa_vol, "uat@company.com")] == {Privilege.READ_VOLUME}
+        assert Privilege.WRITE_VOLUME not in vol_grants[(dev_vol, "uat@company.com")]
+        assert Privilege.WRITE_VOLUME not in vol_grants[(qa_vol, "uat@company.com")]
 
     def test_empty_manifest(self) -> None:
         (result, *_) = _provision(manifest=_manifest(objects=[], schemas=[]))

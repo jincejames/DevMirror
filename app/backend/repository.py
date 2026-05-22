@@ -130,6 +130,38 @@ class ConfigRepository:
         )
         db_client.sql_exec_with_params(sql, {"dr_id": dr_id, "status": status, "updated_at": now})
 
+    def reject(
+        self,
+        db_client: DbClient,
+        *,
+        dr_id: str,
+        comment: str,
+        rejected_by: str,
+        rejected_at: str,
+    ) -> None:
+        """Mark a config row as REJECTED with the admin's comment.
+
+        Writes status + the three rejection metadata columns in a single
+        UPDATE.  The endpoint (`POST /api/configs/{dr_id}/reject`) is
+        responsible for guarding the source status (only ``valid`` or
+        ``scanned`` are eligible) -- this method is a thin DB writer.
+        """
+        sql = (
+            f"UPDATE {self._table} SET "
+            "status = 'rejected', "
+            "rejection_comment = :rejection_comment, "
+            "rejected_by = :rejected_by, "
+            "rejected_at = :rejected_at, "
+            "updated_at = :rejected_at "
+            "WHERE dr_id = :dr_id"
+        )
+        db_client.sql_exec_with_params(sql, {
+            "dr_id": dr_id,
+            "rejection_comment": comment,
+            "rejected_by": rejected_by,
+            "rejected_at": rejected_at,
+        })
+
     def update_manifest(
         self,
         db_client: DbClient,

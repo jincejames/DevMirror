@@ -27,7 +27,7 @@ env:
   - name: DEVMIRROR_WAREHOUSE_ID
     value: ddd608fa0bad97a1
   - name: DEVMIRROR_CONTROL_CATALOG
-    value: odp_adw_support_i
+    value: odp_adw_utilities_i
   - name: DEVMIRROR_CONTROL_SCHEMA
     value: fastsetup
   - name: DEVMIRROR_ADMIN_GROUP

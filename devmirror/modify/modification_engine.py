@@ -236,8 +236,15 @@ def _manage_users(
     db_client: DbClient,
     obj_repo: DrObjectRepository,
     access_repo: DrAccessRepository | None = None,
+    writable: bool = True,
 ) -> ActionResult:
-    """Grant or revoke access for users on all DR schemas."""
+    """Grant or revoke access for users on all DR schemas.
+
+    ``writable=False`` produces read-only grants (no MODIFY) -- used for
+    UAT-user grants which are SELECT-only across every provisioned env.
+    Revokes always strip the full set of privileges; revoking MODIFY when
+    it was never granted is a no-op in UC.
+    """
     try:
         schema_fqns = _get_schemas_for_env(obj_repo, db_client, dr_id, environment)
 
@@ -249,10 +256,13 @@ def _manage_users(
             )
 
         if action == "add_users":
-            access_result = apply_grants(db_client, schema_fqns, users)
+            access_result = apply_grants(
+                db_client, schema_fqns, users, writable=writable,
+            )
             # Record access rows
             if access_repo is not None:
                 now = now_iso()
+                level = "READ_WRITE" if writable else "READ_ONLY"
                 for user in users:
                     try:
                         access_repo.bulk_insert(
@@ -261,7 +271,7 @@ def _manage_users(
                                 "dr_id": dr_id,
                                 "user_email": user,
                                 "environment": environment,
-                                "access_level": "READ_WRITE",
+                                "access_level": level,
                                 "granted_at": now,
                             }],
                         )
@@ -357,8 +367,8 @@ def modify_dr(
     remove_objects: list[str] | None = None,
     add_dev_users: list[str] | None = None,
     remove_dev_users: list[str] | None = None,
-    add_qa_users: list[str] | None = None,
-    remove_qa_users: list[str] | None = None,
+    add_uat_users: list[str] | None = None,
+    remove_uat_users: list[str] | None = None,
     new_expiration_date: str | None = None,
     data_revision: DataRevision | None = None,
     add_streams: list[str] | None = None,
@@ -385,12 +395,19 @@ def modify_dr(
             "Modification is only allowed on ACTIVE or EXPIRING_SOON DRs."
         )
 
-    # Dispatch actions via a table-driven pattern
-    _user_actions: list[tuple[list[str] | None, str, str]] = [
-        (add_dev_users, "add_users", "dev"),
-        (remove_dev_users, "remove_users", "dev"),
-        (add_qa_users, "add_users", "qa"),
-        (remove_qa_users, "remove_users", "qa"),
+    # Dispatch actions via a table-driven pattern.
+    # Tuple shape: (users, action, env, writable).
+    # Developers get RW on each env they were granted for; UAT users get RO
+    # on EVERY provisioned env -- so the UAT add/remove rows fan out over
+    # both "dev" and "qa" (a no-schema env short-circuits to a friendly
+    # ActionResult inside `_manage_users`).
+    _user_actions: list[tuple[list[str] | None, str, str, bool]] = [
+        (add_dev_users,    "add_users",    "dev", True),
+        (remove_dev_users, "remove_users", "dev", True),
+        (add_uat_users,    "add_users",    "dev", False),
+        (add_uat_users,    "add_users",    "qa",  False),
+        (remove_uat_users, "remove_users", "dev", False),
+        (remove_uat_users, "remove_users", "qa",  False),
     ]
 
     if add_objects:
@@ -403,11 +420,12 @@ def modify_dr(
         ar = _remove_objects(dr_id, remove_objects, db_client, obj_repo)
         result.actions.append(ar)
 
-    for users, action_name, env in _user_actions:
+    for users, action_name, env, writable in _user_actions:
         if users:
             ar = _manage_users(
                 action_name, dr_id, users, env, db_client, obj_repo,
                 access_repo if action_name == "add_users" else None,
+                writable=writable,
             )
             result.actions.append(ar)
 

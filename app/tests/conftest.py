@@ -31,6 +31,10 @@ def valid_config_payload(**overrides) -> dict:
         "streams": ["my-job-1"],
         "developers": ["dev@example.com"],
         "expiration_date": future_date(30),
+        # Description is mandatory at the API layer (min 5 chars, non-blank)
+        # so every default payload carries a placeholder; tests that exercise
+        # description-validation pass overrides explicitly.
+        "description": "Test DR for unit tests",
     }
     defaults.update(overrides)
     return defaults

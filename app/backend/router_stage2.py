@@ -27,6 +27,7 @@ from .helpers import (
     _target_catalog_override,
 )
 from .models import (
+    CleanupFailure,
     CleanupResponse,
     DrListItem,
     DrListResponse,
@@ -241,6 +242,7 @@ def provision_config(
                 audit_repo=audit_repo,
                 max_parallel=settings.max_parallel_clones,
                 force_replace=True,
+                original_created_by=row.get("created_by"),
             )
         # Only mark as "provisioned" if at least some objects succeeded
         if len(result.objects_succeeded) > 0:
@@ -344,18 +346,33 @@ def get_dr_status(
         status = obj.get("status", "UNKNOWN")
         breakdown[status] = breakdown.get(status, 0) + 1
 
+    # Canonical owner is the user who submitted the underlying config, not
+    # whichever value the runner happened to record on the DR row.  Older
+    # runs wrote `developers[0]` into dr.created_by, which breaks owner UX
+    # when the requester isn't the first developer in the access list.
+    # Falls back to dr_row.created_by if the config row is gone (cleaned up).
+    cfg_repo = _get_repo(settings, db_client)
+    cfg_row = cfg_repo.get(db_client, dr_id=dr_id)
+    owner = (
+        (cfg_row or {}).get("created_by")
+        or dr_row.get("created_by", "")
+    )
+
     return DrStatusResponse(
         dr_id=dr_id,
         status=dr_row.get("status", "UNKNOWN"),
         description=dr_row.get("description"),
         expiration_date=dr_row.get("expiration_date", ""),
         created_at=dr_row.get("created_at", ""),
-        created_by=dr_row.get("created_by", ""),
+        created_by=owner,
         last_refreshed_at=dr_row.get("last_refreshed_at"),
         objects=objects,
         total_objects=len(objects),
         object_breakdown=breakdown,
         recent_audit=audit_entries,
+        rejection_comment=dr_row.get("rejection_comment"),
+        rejected_by=dr_row.get("rejected_by"),
+        rejected_at=dr_row.get("rejected_at"),
     )
 
 
@@ -464,12 +481,18 @@ def cleanup_dr_endpoint(
             detail=f"DR {dr_id} not found in control tables",
         )
 
+    def _as_failures(items: list) -> list[CleanupFailure]:
+        return [CleanupFailure(fqn=fqn, error=err) for fqn, err in items]
+
     return CleanupResponse(
         dr_id=dr_id,
         final_status=result.final_status,
         objects_dropped=result.objects_dropped,
         schemas_dropped=result.schemas_dropped,
         revokes_succeeded=result.revokes_succeeded,
+        objects_failed=_as_failures(result.objects_failed),
+        schemas_failed=_as_failures(result.schemas_failed),
+        revokes_failed=_as_failures(result.revokes_failed),
     )
 
 
@@ -615,6 +638,7 @@ def reprovision_dr_endpoint(
                 audit_repo=audit_repo,
                 max_parallel=settings.max_parallel_clones,
                 force_replace=True,
+                original_created_by=row.get("created_by"),
             )
 
         # Only mark as "provisioned" if at least some objects succeeded
@@ -656,7 +680,7 @@ def modify_dr_endpoint(
     """Modify expiration date or user access on a provisioned DR.
 
     Phase 2: changes to user-list fields (``add_developers`` /
-    ``remove_developers`` / ``add_qa_users`` / ``remove_qa_users``) are
+    ``remove_developers`` / ``add_uat_users`` / ``remove_uat_users``) are
     staged for admin approval (HTTP 202) instead of being applied
     immediately. Expiration-only changes still go through the engine.
     """
@@ -687,8 +711,8 @@ def modify_dr_endpoint(
     user_changes = bool(
         body.add_developers
         or body.remove_developers
-        or body.add_qa_users
-        or body.remove_qa_users
+        or body.add_uat_users
+        or body.remove_uat_users
     )
     if user_changes:
         from .approvals import compute_diff, stage_pending_edit
@@ -704,9 +728,9 @@ def modify_dr_endpoint(
             (set(old_dict.get("developers") or []) - set(body.remove_developers or []))
             | set(body.add_developers or [])
         )
-        new_dict["qa_users"] = sorted(
-            (set(old_dict.get("qa_users") or []) - set(body.remove_qa_users or []))
-            | set(body.add_qa_users or [])
+        new_dict["uat_users"] = sorted(
+            (set(old_dict.get("uat_users") or []) - set(body.remove_uat_users or []))
+            | set(body.add_uat_users or [])
         )
         changes = compute_diff(old_dict, new_dict)
         if changes:
@@ -741,8 +765,8 @@ def modify_dr_endpoint(
             audit_repo=audit_repo,
             add_dev_users=body.add_developers,
             remove_dev_users=body.remove_developers,
-            add_qa_users=body.add_qa_users,
-            remove_qa_users=body.remove_qa_users,
+            add_uat_users=body.add_uat_users,
+            remove_uat_users=body.remove_uat_users,
             new_expiration_date=body.new_expiration_date,
             performed_by=current_user,
         )

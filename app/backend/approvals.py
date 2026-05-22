@@ -12,18 +12,18 @@ import uuid
 from typing import Any
 
 # Sensitive fields whose edit on a provisioned DR requires admin approval.
-SENSITIVE_FIELDS = ("access.developers", "access.qa_users", "additional_objects")
+SENSITIVE_FIELDS = ("access.developers", "access.uat_users", "additional_objects")
 
 
 def compute_diff(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
     """Return [{field, before, after}, ...] for fields that differ.
 
-    Compares the union of ``access.developers``, ``access.qa_users``,
+    Compares the union of ``access.developers``, ``access.uat_users``,
     ``additional_objects``, ``description``, ``lifecycle.expiration_date``.
     """
     fields = (
         ("access.developers", "developers"),
-        ("access.qa_users", "qa_users"),
+        ("access.uat_users", "uat_users"),
         ("additional_objects", "additional_objects"),
         ("description", "description"),
         ("lifecycle.expiration_date", "expiration_date"),

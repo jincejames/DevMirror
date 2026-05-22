@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { getManifest, getConfig, updateManifest, startProvision } from '../api';
+import { getManifest, getConfig, updateManifest, startProvision, rejectConfig } from '../api';
 import { useUser } from '../UserContext';
-import type { ManifestData, ManifestObject } from '../types';
+import type { ConfigOut, ManifestData, ManifestObject } from '../types';
 
 export default function ScanResults() {
   const { drId } = useParams<{ drId: string }>();
@@ -18,6 +18,11 @@ export default function ScanResults() {
   const [dirty, setDirty] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [createdBy, setCreatedBy] = useState('');
+  // Rejection state -- only meaningful for admin reviewing the request.
+  const [config, setConfig] = useState<ConfigOut | null>(null);
+  const [showReject, setShowReject] = useState(false);
+  const [rejectComment, setRejectComment] = useState('');
+  const [rejecting, setRejecting] = useState(false);
 
   useEffect(() => {
     if (!drId) return;
@@ -30,10 +35,42 @@ export default function ScanResults() {
         setManifest(manifestResp.manifest);
         setObjects(manifestResp.manifest.objects ?? []);
         setCreatedBy(configResp.created_by ?? '');
+        setConfig(configResp);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load manifest'))
       .finally(() => setLoading(false));
   }, [drId]);
+
+  async function handleReject() {
+    if (!drId) return;
+    const comment = rejectComment.trim();
+    if (!comment) {
+      alert('Rejection comment cannot be empty.');
+      return;
+    }
+    setRejecting(true);
+    try {
+      const resp = await rejectConfig(drId, { comment });
+      // Reflect the new rejected state in-place so the banner shows up
+      // and the action buttons hide; staying on the page lets the admin
+      // see the audit-trail message immediately.
+      setConfig((prev) =>
+        prev
+          ? { ...prev,
+              status: resp.status,
+              rejection_comment: resp.rejection_comment,
+              rejected_by: resp.rejected_by,
+              rejected_at: resp.rejected_at }
+          : prev,
+      );
+      setShowReject(false);
+      setRejectComment('');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Reject failed');
+    } finally {
+      setRejecting(false);
+    }
+  }
 
   function handleRemove(fqn: string) {
     setObjects((prev) => prev.filter((o) => o.fqn !== fqn));
@@ -91,7 +128,27 @@ export default function ScanResults() {
         <div className="owner-label">Owner: {createdBy}</div>
       )}
 
-      {!isAdmin && (
+      {config?.status === 'rejected' && config.rejection_comment && (
+        <div className="banner banner-error">
+          <strong>This request was rejected.</strong>{' '}
+          {config.rejected_by && (
+            <>
+              {config.rejected_by}
+              {config.rejected_at && ` on ${config.rejected_at}`}
+              {' '}wrote:
+            </>
+          )}
+          <div style={{ marginTop: '0.5em', fontStyle: 'italic' }}>
+            &ldquo;{config.rejection_comment}&rdquo;
+          </div>
+          <small>
+            Open the config from the home page, edit it to address the
+            feedback above, and re-save to re-submit for review.
+          </small>
+        </div>
+      )}
+
+      {!isAdmin && config?.status !== 'rejected' && (
         <div className="banner banner-info">Scan results are pending admin review.</div>
       )}
 
@@ -173,13 +230,23 @@ export default function ScanResults() {
         </tbody>
       </table>
 
-      {isAdmin && (
+      {/* Action row: admin can Save / Approve / Reject while the config
+          is still actionable.  A rejected config hides the buttons --
+          there's nothing actionable left. */}
+      {isAdmin && config?.status !== 'rejected' && (
         <div className="form-actions">
           <button onClick={handleSave} disabled={saving || !dirty}>
             {saving ? 'Saving...' : 'Save Changes'}
           </button>
           <button onClick={() => setShowConfirm(true)} disabled={saving}>
             Approve &amp; Provision
+          </button>
+          <button
+            className="btn-danger"
+            onClick={() => setShowReject(true)}
+            disabled={saving || rejecting}
+          >
+            {rejecting ? 'Rejecting...' : 'Reject'}
           </button>
         </div>
       )}
@@ -195,6 +262,46 @@ export default function ScanResults() {
             <div className="dialog-actions">
               <button className="btn-secondary" onClick={() => setShowConfirm(false)}>Cancel</button>
               <button onClick={handleProvision}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reject dialog -- admin only; required non-empty comment. */}
+      {isAdmin && showReject && (
+        <div className="dialog-overlay" onClick={() => setShowReject(false)}>
+          <div className="dialog-box" onClick={(e) => e.stopPropagation()}>
+            <h3>Reject DR {drId}</h3>
+            <p>
+              The comment below will be shown to the owner. They can edit
+              the request to address the feedback and re-submit it.
+            </p>
+            <div className="form-field">
+              <label htmlFor="reject-comment">Reason (required)</label>
+              <textarea
+                id="reject-comment"
+                rows={4}
+                value={rejectComment}
+                onChange={(e) => setRejectComment(e.target.value)}
+                placeholder="e.g. Source catalog isn't approved for the requesting team."
+                style={{ width: '100%', boxSizing: 'border-box' }}
+              />
+            </div>
+            <div className="dialog-actions">
+              <button
+                className="btn-secondary"
+                onClick={() => { setShowReject(false); setRejectComment(''); }}
+                disabled={rejecting}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={handleReject}
+                disabled={rejecting || !rejectComment.trim()}
+              >
+                {rejecting ? 'Rejecting...' : 'Confirm Reject'}
+              </button>
             </div>
           </div>
         </div>

@@ -54,11 +54,21 @@ _DR_DISALLOWED = [
     (DRStatus.CLEANED_UP, DRStatus.ACTIVE),
     (DRStatus.ACTIVE, DRStatus.PENDING_REVIEW),
     (DRStatus.EXPIRED, DRStatus.ACTIVE),
+    # REJECTED is terminal and only reachable from PENDING_REVIEW.
+    (DRStatus.ACTIVE, DRStatus.REJECTED),
+    (DRStatus.PROVISIONING, DRStatus.REJECTED),
+    (DRStatus.REJECTED, DRStatus.ACTIVE),
+    (DRStatus.REJECTED, DRStatus.PROVISIONING),
+    (DRStatus.REJECTED, DRStatus.CLEANUP_IN_PROGRESS),
+]
+
+_DR_ALLOWED_REJECT = [
+    (DRStatus.PENDING_REVIEW, DRStatus.REJECTED),
 ]
 
 
 class TestDRTransitions:
-    @pytest.mark.parametrize("cur,tgt", _DR_ALLOWED)
+    @pytest.mark.parametrize("cur,tgt", _DR_ALLOWED + _DR_ALLOWED_REJECT)
     def test_allowed(self, cur, tgt) -> None:
         validate_dr_status_transition(cur, tgt)
 
@@ -210,6 +220,48 @@ class TestDRRepository:
         called_sql, params = db.sql_exec_with_params.call_args[0]
         assert ":notification_sent_at" in called_sql
         assert params == {"dr_id": "DR-1", "notification_sent_at": "2026-04-01T00:00:00Z"}
+
+    def test_reject_writes_metadata_columns_and_status(self) -> None:
+        repo, db = DRRepository(FQN), _mock_db()
+        sql = repo.reject(
+            db, dr_id="DR-1",
+            current_status=DRStatus.PENDING_REVIEW,
+            comment="Doesn't follow naming convention",
+            rejected_by="admin@co.com",
+            rejected_at="2026-05-22T10:00:00Z",
+        )
+        # SQL touches all five fields in one UPDATE -> CAS-gated on current
+        # status so concurrent provisions on the same DR don't silently flip
+        # the row.
+        assert "UPDATE" in sql
+        assert "rejection_comment = :rejection_comment" in sql
+        assert "rejected_by = :rejected_by" in sql
+        assert "rejected_at = :rejected_at" in sql
+        assert "status = :new_status" in sql
+        assert "AND status = :current_status" in sql
+        params = db.sql_exec_with_params.call_args[0][1]
+        assert params["new_status"] == "REJECTED"
+        assert params["current_status"] == "PENDING_REVIEW"
+        assert params["rejection_comment"] == "Doesn't follow naming convention"
+        assert params["rejected_by"] == "admin@co.com"
+        assert params["rejected_at"] == "2026-05-22T10:00:00Z"
+        # last_modified_at mirrors rejected_at so the row's audit timestamp
+        # stays consistent.
+        assert params["last_modified_at"] == "2026-05-22T10:00:00Z"
+
+    def test_reject_validates_transition(self) -> None:
+        # Only PENDING_REVIEW -> REJECTED is allowed.  Attempting to reject
+        # an ACTIVE DR must raise BEFORE any UPDATE is issued.
+        repo, db = DRRepository(FQN), _mock_db()
+        with pytest.raises(StatusTransitionError):
+            repo.reject(
+                db, dr_id="DR-1",
+                current_status=DRStatus.ACTIVE,
+                comment="Too late",
+                rejected_by="admin@co.com",
+                rejected_at="2026-05-22T10:00:00Z",
+            )
+        db.sql_exec_with_params.assert_not_called()
 
 
 # ------------------------------------------------------------------
@@ -386,16 +438,48 @@ class TestDrAccessRepository:
 
 class TestDDL:
     def test_render_ddl(self) -> None:
+        # render_ddl now concatenates every migration in devmirror/migrations/
+        # (001 + 002 + 003), so it emits all six control-plane tables PLUS
+        # two forward-compat ALTERs that add rejection columns to
+        # fastsetup_development_requests (legacy planned reject path) and
+        # fastsetup_configs (current canonical reject path).  Total: 8.
         stmts = render_ddl("c", "s")
-        assert len(stmts) == 4
+        assert len(stmts) == 8
         joined = "\n".join(stmts)
-        for name in ["fastsetup_development_requests", "fastsetup_dr_objects", "fastsetup_dr_access", "audit_log"]:
+        for name in [
+            "fastsetup_development_requests",
+            "fastsetup_dr_objects",
+            "fastsetup_dr_access",
+            "audit_log",
+            "fastsetup_configs",
+            "fastsetup_id_counter",
+        ]:
             assert name in joined
+        # Rejection columns land via both CREATE (new deploys) and an
+        # idempotent ALTER (existing deploys).
+        assert "rejection_comment" in joined
+        assert "rejected_by" in joined
+        assert "rejected_at" in joined
+        assert "ALTER TABLE" in joined
         assert "{control_catalog}" not in joined
 
     def test_apply_ddl(self) -> None:
         db, settings = _mock_db(), MagicMock()
         settings.control_catalog = "c"
         settings.control_schema = "s"
-        assert len(apply_control_ddl(db, settings)) == 4
-        assert db.sql_exec.call_count == 4
+        assert len(apply_control_ddl(db, settings)) == 8
+
+    def test_apply_ddl_is_best_effort_on_per_statement_failure(self) -> None:
+        # ALTER TABLE ADD COLUMNS fails on a second run because the columns
+        # already exist.  apply_control_ddl must swallow per-statement
+        # failures and keep going so the rest of the migration runs.
+        db, settings = MagicMock(), MagicMock()
+        settings.control_catalog = "c"
+        settings.control_schema = "s"
+        # Mid-loop failure on the 4th statement; later ones must still run.
+        outcomes = [None, None, None, RuntimeError("boom"), None, None, None, None]
+        db.sql_exec = MagicMock(side_effect=outcomes)
+        applied = apply_control_ddl(db, settings)
+        # All 8 statements were attempted; 7 succeeded, 1 swallowed.
+        assert len(applied) == 7
+        assert db.sql_exec.call_count == 8

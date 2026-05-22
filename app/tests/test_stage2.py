@@ -400,6 +400,7 @@ class TestGetDrStatus:
         dr_repo.get.return_value = {
             "dr_id": "DR-1042", "status": "ACTIVE", "description": "Test DR",
             "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+            "created_by": "dr-row@example.com",
             "last_refreshed_at": None,
         }
         MockObjRepo.return_value.list_by_dr_id.return_value = [
@@ -409,6 +410,11 @@ class TestGetDrStatus:
         MockAuditRepo.return_value.list_by_dr_id.return_value = [
             {"action": "PROVISION", "status": "SUCCESS", "performed_at": "2026-04-01T10:00:00"},
         ]
+        # No config row -> owner falls back to dr_row.created_by.  The
+        # mock_db fixture wires sql_with_params.side_effect to delegate to
+        # sql, so we configure sql.return_value here for the config-repo
+        # round-trip to surface as "no rows".
+        mock_db.sql.return_value = []
 
         resp = client.get("/api/drs/DR-1042/status")
         assert resp.status_code == 200
@@ -418,6 +424,67 @@ class TestGetDrStatus:
         assert data["total_objects"] == 2
         assert data["object_breakdown"]["PROVISIONED"] == 2
         assert len(data["recent_audit"]) == 1
+        # No rejection metadata on an ACTIVE DR.
+        assert data["rejection_comment"] is None
+        # Owner falls back to dr_row's value when no config row is found.
+        assert data["created_by"] == "dr-row@example.com"
+
+    @patch(_CONTROL_REPO_PATCHES[0])
+    @patch(_CONTROL_REPO_PATCHES[1])
+    @patch(_CONTROL_REPO_PATCHES[2])
+    def test_dr_status_prefers_config_created_by_over_dr_row(
+        self, MockDRRepo, MockObjRepo, MockAuditRepo, client, mock_db,
+    ):
+        """The DR row historically recorded developers[0] as created_by,
+        which is wrong when the requester isn't first in the list.  The
+        config row is the source of truth; status response must reconcile."""
+        MockDRRepo.return_value.get.return_value = {
+            "dr_id": "DR-1042", "status": "ACTIVE", "description": None,
+            "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+            "created_by": "dev1@example.com",  # legacy: developers[0]
+            "last_refreshed_at": None,
+        }
+        MockObjRepo.return_value.list_by_dr_id.return_value = []
+        MockAuditRepo.return_value.list_by_dr_id.return_value = []
+        # Config row exists and has a DIFFERENT created_by -- the real
+        # requester.  The endpoint should surface this value, not the
+        # DR row's developers[0].
+        mock_db.sql.return_value = [{
+            "dr_id": "DR-1042",
+            "created_by": "requester@example.com",
+            "config_json": "{}",
+        }]
+
+        resp = client.get("/api/drs/DR-1042/status")
+        assert resp.status_code == 200
+        assert resp.json()["created_by"] == "requester@example.com"
+
+    @patch(_CONTROL_REPO_PATCHES[0])
+    @patch(_CONTROL_REPO_PATCHES[1])
+    @patch(_CONTROL_REPO_PATCHES[2])
+    def test_dr_status_surfaces_rejection_metadata(
+        self, MockDRRepo, MockObjRepo, MockAuditRepo, client, mock_db,
+    ):
+        MockDRRepo.return_value.get.return_value = {
+            "dr_id": "DR-1042", "status": "REJECTED", "description": None,
+            "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
+            "created_by": "requester@example.com",
+            "last_refreshed_at": None,
+            "rejection_comment": "Doesn't follow naming convention",
+            "rejected_by": "admin@example.com",
+            "rejected_at": "2026-05-22T10:00:00Z",
+        }
+        MockObjRepo.return_value.list_by_dr_id.return_value = []
+        MockAuditRepo.return_value.list_by_dr_id.return_value = []
+        mock_db.sql.return_value = []
+
+        resp = client.get("/api/drs/DR-1042/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "REJECTED"
+        assert data["rejection_comment"] == "Doesn't follow naming convention"
+        assert data["rejected_by"] == "admin@example.com"
+        assert data["rejected_at"] == "2026-05-22T10:00:00Z"
 
     @patch("devmirror.control.control_table.DRRepository")
     def test_dr_status_not_found(self, MockDRRepo, client, mock_db):
@@ -492,6 +559,10 @@ class TestCleanupDr:
         mock_result.objects_dropped = 5
         mock_result.schemas_dropped = 2
         mock_result.revokes_succeeded = 4
+        # No partial failures on the happy path.
+        mock_result.objects_failed = []
+        mock_result.schemas_failed = []
+        mock_result.revokes_failed = []
         mock_cleanup.return_value = mock_result
 
         resp = client.post("/api/drs/DR-1042/cleanup")
@@ -499,6 +570,44 @@ class TestCleanupDr:
         data = resp.json()
         assert data["final_status"] == "CLEANED_UP"
         assert data["objects_dropped"] == 5
+        assert data["objects_failed"] == []
+        assert data["schemas_failed"] == []
+        assert data["revokes_failed"] == []
+
+    @patch("devmirror.cleanup.cleanup_engine.cleanup_dr")
+    def test_cleanup_partial_success(self, mock_cleanup, client, mock_db):
+        # Some objects + schemas couldn't be dropped (typically because the
+        # app SP lacks MANAGE on the schema in question).  The endpoint must
+        # surface every failure with its FQN + error message so the UI can
+        # render the partial-success banner.
+        mock_result = MagicMock()
+        mock_result.final_status = "CLEANUP_IN_PROGRESS"
+        mock_result.objects_dropped = 3
+        mock_result.schemas_dropped = 1
+        mock_result.revokes_succeeded = 2
+        mock_result.objects_failed = [
+            ("cat.sch.tbl_a", "PERMISSION_DENIED: User does not have MANAGE"),
+        ]
+        mock_result.schemas_failed = [
+            ("cat.sch_x", "PERMISSION_DENIED: User does not have MANAGE on Schema"),
+            ("cat.sch_y", "PERMISSION_DENIED: User does not have MANAGE on Schema"),
+        ]
+        mock_result.revokes_failed = []
+        mock_cleanup.return_value = mock_result
+
+        resp = client.post("/api/drs/DR-1042/cleanup")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["final_status"] == "CLEANUP_IN_PROGRESS"
+        assert data["objects_dropped"] == 3
+        # Failures preserved as {fqn, error} objects, not tuples.
+        assert data["objects_failed"] == [
+            {"fqn": "cat.sch.tbl_a", "error": "PERMISSION_DENIED: User does not have MANAGE"},
+        ]
+        assert len(data["schemas_failed"]) == 2
+        assert data["schemas_failed"][0]["fqn"] == "cat.sch_x"
+        assert "PERMISSION_DENIED" in data["schemas_failed"][0]["error"]
+        assert data["revokes_failed"] == []
 
     @patch("devmirror.cleanup.cleanup_engine.cleanup_dr")
     def test_cleanup_not_found(self, mock_cleanup, client, mock_db):
@@ -951,7 +1060,7 @@ class TestModifyDr:
             status="provisioned",
             created_by="testuser@example.com",
         )
-        # Override config_json so developers/qa_users are deterministic.
+        # Override config_json so developers/uat_users are deterministic.
         cfg_row["config_json"] = json.dumps(valid_config_payload(
             dr_id="DR-1042",
             developers=["alice@co.com"],

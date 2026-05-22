@@ -19,6 +19,9 @@ def _minimal_config_in(**overrides) -> ConfigIn:
         "streams": ["my-job-1"],
         "developers": ["dev@example.com"],
         "expiration_date": _future_date(30),
+        # Description is mandatory (min 5 chars); supply a placeholder so
+        # tests that don't exercise description validation can ignore it.
+        "description": "Test DR for unit tests",
     }
     defaults.update(overrides)
     return ConfigIn(**defaults)
@@ -46,12 +49,12 @@ class TestConfigInToDevMirrorConfig:
     def test_qa_enabled(self):
         config_in = _minimal_config_in(
             qa_enabled=True,
-            qa_users=["qa@example.com"],
+            uat_users=["uat@example.com"],
         )
         dm = config_in.to_devmirror_config()
         assert dm.development_request.environments.qa is not None
         assert dm.development_request.environments.qa.enabled is True
-        assert dm.development_request.access.qa_users == ["qa@example.com"]
+        assert dm.development_request.access.uat_users == ["uat@example.com"]
 
     def test_version_revision(self):
         config_in = _minimal_config_in(
@@ -105,6 +108,28 @@ class TestConfigInToDevMirrorConfig:
 class TestConfigInValidation:
     """Tests for ConfigIn's own Pydantic validators."""
 
+    def test_legacy_qa_users_key_parses_via_alias(self):
+        # Configs created before the UAT rename still have `qa_users` in
+        # their stored `config_json`.  ConfigIn must accept that legacy
+        # key as an alias for `uat_users` so the scan/view endpoints
+        # don't 500 on existing rows.  Canonical output should always be
+        # `uat_users`.
+        import json
+        legacy = json.dumps({
+            "dr_id": "DR-1042",
+            "streams": ["stream-1"],
+            "developers": ["dev@example.com"],
+            "qa_users": ["qa@example.com"],
+            "expiration_date": "2099-01-01",
+            "description": "Legacy alias test config",
+        })
+        cfg = ConfigIn.model_validate_json(legacy)
+        assert cfg.uat_users == ["qa@example.com"]
+        # Roundtrip: dump produces `uat_users`, not `qa_users`.
+        dumped = json.loads(cfg.model_dump_json())
+        assert dumped["uat_users"] == ["qa@example.com"]
+        assert "qa_users" not in dumped
+
     def test_empty_streams_rejected_without_additional_objects(self):
         with pytest.raises(ValidationError) as exc_info:
             _minimal_config_in(streams=[])
@@ -121,6 +146,48 @@ class TestConfigInValidation:
         )
         assert config_in.streams == []
         assert config_in.additional_objects == ["cat.sch.tbl"]
+
+
+class TestDescriptionValidation:
+    """Description is mandatory: must be non-blank and >= 5 characters."""
+
+    def test_missing_description_rejected(self):
+        # Field-omitted -> Pydantic emits the standard "Field required"
+        # because mode="before" validators only run when a value is
+        # present.  Either message proves the field is mandatory.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="(Field required|Description is required)"):
+            ConfigIn(
+                streams=["s"],
+                developers=["d@co.com"],
+                expiration_date="2099-01-01",
+            )
+
+    def test_whitespace_only_description_rejected(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="Description is required"):
+            _minimal_config_in(description="    ")
+
+    def test_too_short_description_rejected(self):
+        # 4 chars after trimming -> below the 5-char floor.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="at least 5 characters"):
+            _minimal_config_in(description="abcd")
+
+    def test_too_short_after_trim_rejected(self):
+        # Padded with whitespace but only 3 visible chars -> still rejected.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="at least 5 characters"):
+            _minimal_config_in(description="  abc  ")
+
+    def test_exactly_five_chars_accepted(self):
+        cfg = _minimal_config_in(description="abcde")
+        assert cfg.description == "abcde"
+
+    def test_description_trimmed_on_save(self):
+        # Leading/trailing whitespace is stripped so storage stays canonical.
+        cfg = _minimal_config_in(description="  My DR description  ")
+        assert cfg.description == "My DR description"
 
     def test_both_streams_and_additional_objects_empty_rejected(self):
         with pytest.raises(ValidationError) as exc_info:

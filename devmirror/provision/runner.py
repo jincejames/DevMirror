@@ -235,8 +235,17 @@ def provision_dr(
     audit_repo: AuditRepository,
     max_parallel: int = 10,
     force_replace: bool = False,
+    original_created_by: str | None = None,
 ) -> ProvisionResult:
-    """Execute the full provisioning flow for a development request."""
+    """Execute the full provisioning flow for a development request.
+
+    ``original_created_by`` is the email of the user who *submitted* the
+    underlying config (from the ConfigRepository row).  When set, it is
+    written to the DR row's ``created_by`` so the displayed owner matches
+    the requester rather than the first developer in the access list.
+    Falls back to ``dr.access.developers[0]`` for legacy callers / CLI
+    use that doesn't have a config-row context.
+    """
     dr = config.development_request
     dr_id = dr.dr_id
     result = ProvisionResult(dr_id=dr_id)
@@ -278,7 +287,10 @@ def provision_dr(
             status=DRStatus.PROVISIONING.value,
             config_yaml=config.model_dump_json(),
             created_at=now,
-            created_by=dr.access.developers[0] if dr.access.developers else "SYSTEM",
+            created_by=(
+                original_created_by
+                or (dr.access.developers[0] if dr.access.developers else "SYSTEM")
+            ),
             expiration_date=dr.lifecycle.expiration_date.isoformat(),
             last_modified_at=now,
         )
@@ -495,112 +507,96 @@ def provision_dr(
                 logger.debug("Status update to FAILED failed, non-fatal")
 
     # Grant matrix:
-    #   - Developers get RW on EVERY env (dev and qa).  They need to be
-    #     able to fix what QA users find.
-    #   - QA users get READ-only on the QA env.
-    #   - If the same principal appears in both lists, RW wins
-    #     (developer pass runs first; granting RO on top is idempotent
-    #     in UC but produces audit noise -- so we dedupe by skipping
-    #     such principals in the QA-user pass).
-    # Skip the whole pass when no schemas were created for an env --
+    #   - Developers   -> RW on EVERY provisioned env (dev, and qa when
+    #     enabled).  They need to fix anything UAT reviewers flag.
+    #   - UAT users    -> RO on EVERY provisioned env.  Replaces the old
+    #     qa-only-readers contract; UAT now means "additional read-only
+    #     audience" regardless of which envs were requested.
+    #   - Dedup: if a principal appears in both lists, RW wins (developer
+    #     pass runs first; we filter the UAT-pass principals to those not
+    #     already in developers).
+    # Skip a pass entirely when no schemas were created for an env --
     # apply_grants would still validate principals and produce spurious
     # "principal not found" entries.
     dev_emails = {d.lower() for d in (dr.access.developers or [])}
-    qa_only_users = [
-        u for u in (dr.access.qa_users or [])
+    uat_only_users = [
+        u for u in (dr.access.uat_users or [])
         if u.lower() not in dev_emails
     ]
 
-    dev_schemas = _get_schemas_for_env(config, manifest, "dev")
-    if dev_schemas and dr.access.developers:
-        grant_result = apply_grants(
-            db_client, dev_schemas, list(dr.access.developers), writable=True,
-        )
-        result.grants_applied += grant_result.granted
-        result.grants_failed.extend(grant_result.failed)
-
+    # Build the (env, schemas) pairs once so schema and volume grants share
+    # the same env iteration order.
+    env_schemas: list[tuple[str, list[str]]] = [
+        ("dev", _get_schemas_for_env(config, manifest, "dev")),
+    ]
     if "qa" in envs:
-        qa_schemas = _get_schemas_for_env(config, manifest, "qa")
-        if qa_schemas:
-            if dr.access.developers:
-                dev_qa_result = apply_grants(
-                    db_client, qa_schemas, list(dr.access.developers),
-                    writable=True,
-                )
-                result.grants_applied += dev_qa_result.granted
-                result.grants_failed.extend(dev_qa_result.failed)
-            if qa_only_users:
-                qa_grant_result = apply_grants(
-                    db_client, qa_schemas, qa_only_users, writable=False,
-                )
-                result.grants_applied += qa_grant_result.granted
-                result.grants_failed.extend(qa_grant_result.failed)
+        env_schemas.append(
+            ("qa", _get_schemas_for_env(config, manifest, "qa"))
+        )
+
+    for env_name, schemas in env_schemas:
+        if not schemas:
+            continue
+        if dr.access.developers:
+            grant_result = apply_grants(
+                db_client, schemas, list(dr.access.developers), writable=True,
+            )
+            result.grants_applied += grant_result.granted
+            result.grants_failed.extend(grant_result.failed)
+        if uat_only_users:
+            uat_grant_result = apply_grants(
+                db_client, schemas, uat_only_users, writable=False,
+            )
+            result.grants_applied += uat_grant_result.granted
+            result.grants_failed.extend(uat_grant_result.failed)
 
     # Per-volume grants for the per-DR import-schema Volumes.  Schema-level
-    # USE_SCHEMA was already granted above as part of `apply_grants` on
-    # the import schemas -- this just adds the volume-securable grants
-    # on top.  Same matrix as schema grants.
-    dev_volumes = [
-        row["target_fqn"] for row in all_object_rows
-        if row.get("object_type") == "volume"
-        and row.get("target_environment") == "dev"
-    ]
-    if dev_volumes and dr.access.developers:
-        vol_grant_result = apply_volume_grants(
-            db_client, dev_volumes, list(dr.access.developers), writable=True,
-        )
-        result.grants_applied += vol_grant_result.granted
-        result.grants_failed.extend(vol_grant_result.failed)
-
-    qa_volumes = [
-        row["target_fqn"] for row in all_object_rows
-        if row.get("object_type") == "volume"
-        and row.get("target_environment") == "qa"
-    ]
-    if qa_volumes:
+    # USE_SCHEMA was already granted above as part of `apply_grants` on the
+    # import schemas; this just layers the volume-securable grants on top
+    # with the same RW/RO matrix.
+    for env_name, _ in env_schemas:
+        env_volumes = [
+            row["target_fqn"] for row in all_object_rows
+            if row.get("object_type") == "volume"
+            and row.get("target_environment") == env_name
+        ]
+        if not env_volumes:
+            continue
         if dr.access.developers:
-            dev_qa_vol = apply_volume_grants(
-                db_client, qa_volumes, list(dr.access.developers), writable=True,
+            vol_grant_result = apply_volume_grants(
+                db_client, env_volumes, list(dr.access.developers), writable=True,
             )
-            result.grants_applied += dev_qa_vol.granted
-            result.grants_failed.extend(dev_qa_vol.failed)
-        if qa_only_users:
-            qa_vol_grant_result = apply_volume_grants(
-                db_client, qa_volumes, qa_only_users, writable=False,
+            result.grants_applied += vol_grant_result.granted
+            result.grants_failed.extend(vol_grant_result.failed)
+        if uat_only_users:
+            uat_vol_result = apply_volume_grants(
+                db_client, env_volumes, uat_only_users, writable=False,
             )
-            result.grants_applied += qa_vol_grant_result.granted
-            result.grants_failed.extend(qa_vol_grant_result.failed)
+            result.grants_applied += uat_vol_result.granted
+            result.grants_failed.extend(uat_vol_result.failed)
 
-    # Record access rows -- one row per (principal, environment), with the
-    # access_level reflecting the effective UC grant.  Developers get
-    # READ_WRITE rows in both dev and qa envs (when qa is enabled);
-    # qa-only-users get READ_ONLY rows in qa.  Principals that are in
-    # both lists collapse to a single READ_WRITE row in qa (no duplicate).
+    # Record access rows -- one row per (principal, environment).
+    # Developers: READ_WRITE on every provisioned env.
+    # UAT-only users: READ_ONLY on every provisioned env.
     access_rows: list[dict[str, str]] = []
-    for dev in dr.access.developers:
-        access_rows.append({
-            "dr_id": dr_id,
-            "user_email": dev,
-            "environment": "dev",
-            "access_level": "READ_WRITE",
-            "granted_at": now_iso(),
-        })
-    if "qa" in envs:
+    granted_envs = [env for env, schemas in env_schemas if schemas]
+    granted_at = now_iso()
+    for env_name in granted_envs:
         for dev in dr.access.developers:
             access_rows.append({
                 "dr_id": dr_id,
                 "user_email": dev,
-                "environment": "qa",
+                "environment": env_name,
                 "access_level": "READ_WRITE",
-                "granted_at": now_iso(),
+                "granted_at": granted_at,
             })
-        for qa_user in qa_only_users:
+        for uat_user in uat_only_users:
             access_rows.append({
                 "dr_id": dr_id,
-                "user_email": qa_user,
-                "environment": "qa",
+                "user_email": uat_user,
+                "environment": env_name,
                 "access_level": "READ_ONLY",
-                "granted_at": now_iso(),
+                "granted_at": granted_at,
             })
 
     if force_replace:

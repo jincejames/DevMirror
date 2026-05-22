@@ -100,6 +100,75 @@ class TestDeleteConfig:
         assert resp.status_code == 404
 
 
+class TestRejectConfig:
+    """Admin-only POST /api/configs/{dr_id}/reject -- terminal rejection of
+    a submitted config with a mandatory comment.  Replaces the old
+    DR-level reject -- a config row is what the admin actually reviews."""
+
+    def test_reject_scanned_config_succeeds(self, client, mock_db):
+        mock_db.sql.return_value = [make_db_row(status="scanned")]
+        resp = client.post(
+            "/api/configs/DR-1042/reject",
+            json={"comment": "Naming convention off"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["dr_id"] == "DR-1042"
+        assert body["status"] == "rejected"
+        assert body["rejection_comment"] == "Naming convention off"
+        # The UPDATE SQL must have run with the rejection columns + status.
+        # mock_db captures every sql_exec_with_params call; we expect at
+        # least one with the rejection comment value.
+        any_reject_update = any(
+            "status = 'rejected'" in (call.args[0] if call.args else "")
+            for call in mock_db.sql_exec_with_params.call_args_list
+        )
+        assert any_reject_update, "expected UPDATE setting status='rejected'"
+
+    def test_reject_valid_config_also_succeeds(self, client, mock_db):
+        # `valid` is also an acceptable source status -- the admin might
+        # reject before the user even runs Scan.
+        mock_db.sql.return_value = [make_db_row(status="valid")]
+        resp = client.post(
+            "/api/configs/DR-1042/reject",
+            json={"comment": "Out of scope for this team"},
+        )
+        assert resp.status_code == 200
+
+    def test_reject_provisioned_returns_409(self, client, mock_db):
+        # Already-provisioned configs are out of scope -- the admin should
+        # use cleanup to drop the infrastructure, not reject the request.
+        mock_db.sql.return_value = [make_db_row(status="provisioned")]
+        resp = client.post(
+            "/api/configs/DR-1042/reject", json={"comment": "n/a"},
+        )
+        assert resp.status_code == 409
+        assert "provisioned" in resp.json()["detail"]
+
+    def test_reject_already_rejected_returns_409(self, client, mock_db):
+        mock_db.sql.return_value = [make_db_row(status="rejected")]
+        resp = client.post(
+            "/api/configs/DR-1042/reject", json={"comment": "duplicate"},
+        )
+        assert resp.status_code == 409
+        assert "already rejected" in resp.json()["detail"].lower()
+
+    def test_reject_unknown_config_returns_404(self, client, mock_db):
+        mock_db.sql.return_value = []
+        resp = client.post(
+            "/api/configs/DR-9999/reject", json={"comment": "n/a"},
+        )
+        assert resp.status_code == 404
+
+    def test_reject_empty_comment_returns_422(self, client, mock_db):
+        # Mandatory non-empty comment is enforced at the Pydantic layer
+        # so admins can't bury a rejection with no rationale.
+        resp = client.post(
+            "/api/configs/DR-1042/reject", json={"comment": "   "},
+        )
+        assert resp.status_code == 422
+
+
 class TestRevalidateConfig:
     def test_revalidate_updates_status(self, client, mock_db):
         mock_db.sql.return_value = [make_db_row(status="invalid")]
@@ -272,18 +341,18 @@ class TestOwnershipChecks:
 
 class TestUpdateProvisionedSensitiveEditStagesPending:
     """Phase 2: PUT on a provisioned DR with sensitive-field changes
-    (access.developers, access.qa_users, additional_objects) must NOT
+    (access.developers, access.uat_users, additional_objects) must NOT
     apply grants directly. Instead it stages a CONFIG_EDIT_PENDING audit
     row and returns HTTP 202. Grants are applied only when an admin
     approves via the approval endpoints (covered in Phase 2 tests)."""
 
     @staticmethod
-    def _provisioned_row(developers, qa_users=None, **overrides) -> dict:
+    def _provisioned_row(developers, uat_users=None, **overrides) -> dict:
         """Build a provisioned-status DB row with a specific access list."""
         config = valid_config_payload(
             dr_id="DR-1042",
             developers=developers,
-            qa_users=qa_users or [],
+            uat_users=uat_users or [],
         )
         row = make_db_row(dr_id="DR-1042", status="provisioned", **overrides)
         row["config_json"] = json.dumps(config)
@@ -338,16 +407,16 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
         assert resp.status_code == 202
         mock_manage.assert_not_called()
 
-    def test_qa_change_stages_pending(self, client, mock_db):
-        """QA-side additions/removals stage a pending edit."""
+    def test_uat_change_stages_pending(self, client, mock_db):
+        """UAT-list additions/removals stage a pending edit."""
         row = self._provisioned_row(
-            ["alice@co.com"], qa_users=["qa1@co.com", "qa2@co.com"]
+            ["alice@co.com"], uat_users=["uat1@co.com", "uat2@co.com"]
         )
         mock_db.sql.return_value = [row]
 
         payload = valid_config_payload(
             developers=["alice@co.com"],
-            qa_users=["qa1@co.com", "qa3@co.com"],
+            uat_users=["uat1@co.com", "uat3@co.com"],
         )
         ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
         with ctx, patch("backend.router._manage_users") as mock_manage:

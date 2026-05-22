@@ -16,11 +16,16 @@ bundle:
 #             authenticate the CLI as that SP via M2M).
 #             We deliberately do NOT set bundle-level `run_as`: Databricks
 #             Apps require the app owner to match the deploying identity,
-#             so a separate run_as SP would fail validation.  The lifecycle
-#             job and the app therefore share the deployer identity.
+#             so a bundle-wide run_as SP would fail validation.  The
+#             lifecycle JOB sets its own resource-level `run_as` to the
+#             auto-provisioned FastSetup app SP (see
+#             `lifecycle_job_run_as_sp` var) so the cron-scheduled runs
+#             use the same identity the UI cleanup path already uses --
+#             stable across deployer rotations and consistent with whoever
+#             owns the cloned schemas (the app SP creates them).
 # Compute   : Serverless job compute (no cluster policy, no node_type_id).
 #             The LH workspace must have serverless jobs enabled.
-# Control   : odp_adw_support_n.devmirror Delta tables
+# Control   : odp_adw_support_n.fastsetup Delta tables
 # Admin grp : lhg-odp-adw-support-admin (account-level group)
 #
 # Source layout
@@ -38,7 +43,7 @@ bundle:
 #   cd customers/lh
 #   ../../scripts/build_app.sh         # builds frontend + stages devmirror/
 #   databricks bundle deploy --profile <lh-profile>
-#   databricks bundle run devmirror --profile <lh-profile>
+#   databricks bundle run fastsetup --profile <lh-profile>
 #
 # The deployer must have CAN_USE on the run-as SP, or run as that SP via
 # an M2M auth profile.
@@ -87,6 +92,18 @@ variables:
   app_description:
     description: Human-readable description shown on the Databricks App resource
     default: FastSetup -- UC dev environment cloning (LH)
+
+  lifecycle_job_run_as_sp:
+    description: |
+      applicationId of the SP the lifecycle job runs as.  Defaults to the
+      dev workspace's FastSetup app SP; the lh-preprod target overrides
+      this to the pre-prod app SP.  When the app is recreated (rare --
+      e.g. after a platform OAuth-integration incident), update this to
+      the new applicationId on both branches.  Setting run_as to the
+      same SP that creates DR schemas means the job's cleanup pass has
+      MANAGE on schemas it owns -- the UI cleanup path already runs as
+      this SP, this just brings the scheduled-job path in line.
+    default: d0ea0ebd-4949-4d9d-9154-956c8fb83609
 
   smtp_password_secret:
     description: Apps Secret resource key for DEVMIRROR_SMTP_PASSWORD (set when LH enables email)
@@ -195,7 +212,7 @@ targets:
   # listing isn't relevant from a pre-prod-facing UI).  Provisioning targets
   # still land in `_n` catalogs (LH's deliberate convention -- dev clones
   # AND QA clones both land in `_n`, distinguished only by schema-name
-  # prefix).  Control plane: `odp_adw_support_i.fastsetup`.
+  # prefix).  Control plane: `odp_adw_utilities_i.fastsetup`.
   #
   # IMPORTANT: `app/app.yaml` also has to carry pre-prod-specific env
   # values (WAREHOUSE_ID / CONTROL_CATALOG / empty REMOTE_WORKSPACE_*).
@@ -213,8 +230,9 @@ targets:
     variables:
       app_name: fastsetup-i
       app_description: FastSetup -- UC dev environment cloning (LH pre-prod)
-      control_catalog: odp_adw_support_i
+      control_catalog: odp_adw_utilities_i
       warehouse_id: ddd608fa0bad97a1
+      lifecycle_job_run_as_sp: 727bb86f-9a66-4741-b544-7d0de217f4a7
       remote_workspace_host: ""
       remote_workspace_label: ""
       remote_workspace_id: ""
@@ -253,7 +271,13 @@ artifacts:
 resources:
   jobs:
     devmirror-lifecycle:
-      name: devmirror-lifecycle
+      name: fastsetup-lifecycle
+      run_as:
+        # Run as the FastSetup app SP -- the same identity that creates DR
+        # schemas via the UI/API, so the cleanup pass has MANAGE on schemas
+        # it owns.  Per-target override of `lifecycle_job_run_as_sp` keeps
+        # dev / pre-prod aligned with their respective app SPs.
+        service_principal_name: ${var.lifecycle_job_run_as_sp}
       schedule:
         quartz_cron_expression: "0 0 2 * * ?"
         timezone_id: UTC

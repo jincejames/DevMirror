@@ -40,8 +40,8 @@ export default function DrStatus() {
   const [modExpiration, setModExpiration] = useState('');
   const [modAddDevs, setModAddDevs] = useState('');
   const [modRemoveDevs, setModRemoveDevs] = useState('');
-  const [modAddQa, setModAddQa] = useState('');
-  const [modRemoveQa, setModRemoveQa] = useState('');
+  const [modAddUat, setModAddUat] = useState('');
+  const [modRemoveUat, setModRemoveUat] = useState('');
   const [modifying, setModifying] = useState(false);
   const [modifySuccess, setModifySuccess] = useState('');
 
@@ -71,6 +71,7 @@ export default function DrStatus() {
       setCleaning(false);
     }
   }
+
 
   async function handleRefresh() {
     if (!drId) return;
@@ -110,8 +111,8 @@ export default function DrStatus() {
     }
     setModAddDevs('');
     setModRemoveDevs('');
-    setModAddQa('');
-    setModRemoveQa('');
+    setModAddUat('');
+    setModRemoveUat('');
     setModifySuccess('');
     setShowModify(true);
   }
@@ -130,8 +131,8 @@ export default function DrStatus() {
         s.split(',').map((e) => e.trim()).filter(Boolean);
       if (modAddDevs.trim()) body.add_developers = parseEmails(modAddDevs);
       if (modRemoveDevs.trim()) body.remove_developers = parseEmails(modRemoveDevs);
-      if (modAddQa.trim()) body.add_qa_users = parseEmails(modAddQa);
-      if (modRemoveQa.trim()) body.remove_qa_users = parseEmails(modRemoveQa);
+      if (modAddUat.trim()) body.add_uat_users = parseEmails(modAddUat);
+      if (modRemoveUat.trim()) body.remove_uat_users = parseEmails(modRemoveUat);
 
       const result = await modifyDr(drId, body);
       if ('pending_edit_id' in result) {
@@ -184,13 +185,47 @@ export default function DrStatus() {
         <div className="owner-label">Owner: {data.created_by}</div>
       )}
 
-      {cleanupResult && (
-        <div className="banner banner-success">
-          Cleanup complete: {cleanupResult.objects_dropped} objects dropped,{' '}
-          {cleanupResult.schemas_dropped} schemas dropped,{' '}
-          {cleanupResult.revokes_succeeded} revokes succeeded.
-        </div>
-      )}
+      {cleanupResult && (() => {
+        const objF = cleanupResult.objects_failed ?? [];
+        const schF = cleanupResult.schemas_failed ?? [];
+        const revF = cleanupResult.revokes_failed ?? [];
+        const totalFailed = objF.length + schF.length + revF.length;
+        if (totalFailed === 0) {
+          return (
+            <div className="banner banner-success">
+              Cleanup complete: {cleanupResult.objects_dropped} objects dropped,{' '}
+              {cleanupResult.schemas_dropped} schemas dropped,{' '}
+              {cleanupResult.revokes_succeeded} revokes succeeded.
+            </div>
+          );
+        }
+        const renderList = (label: string, items: typeof objF) =>
+          items.length > 0 && (
+            <details style={{ marginTop: '0.5em' }}>
+              <summary>
+                {label}: {items.length} couldn&apos;t be processed
+              </summary>
+              <ul style={{ margin: '0.25em 0 0 1em', padding: 0 }}>
+                {items.map((f, i) => (
+                  <li key={`${label}-${i}`}>
+                    <code>{f.fqn}</code>: {f.error}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          );
+        return (
+          <div className="banner banner-warning">
+            <strong>Partial cleanup</strong> — {totalFailed} item{totalFailed === 1 ? '' : 's'}{' '}
+            could not be processed (likely UC permission). Successful:{' '}
+            {cleanupResult.objects_dropped} objects, {cleanupResult.schemas_dropped} schemas,{' '}
+            {cleanupResult.revokes_succeeded} revokes.
+            {renderList('Schemas', schF)}
+            {renderList('Objects', objF)}
+            {renderList('Revokes', revF)}
+          </div>
+        );
+      })()}
 
       {modifySuccess && (
         <div className="banner banner-success">
@@ -439,23 +474,23 @@ export default function DrStatus() {
               />
             </div>
             <div className="form-field">
-              <label htmlFor="mod-add-qa">Add QA Users (comma-separated emails)</label>
+              <label htmlFor="mod-add-uat">Add UAT Users (comma-separated emails)</label>
               <input
-                id="mod-add-qa"
+                id="mod-add-uat"
                 type="text"
-                placeholder="qa1@example.com"
-                value={modAddQa}
-                onChange={(e) => setModAddQa(e.target.value)}
+                placeholder="uat1@example.com"
+                value={modAddUat}
+                onChange={(e) => setModAddUat(e.target.value)}
               />
             </div>
             <div className="form-field">
-              <label htmlFor="mod-remove-qa">Remove QA Users (comma-separated emails)</label>
+              <label htmlFor="mod-remove-uat">Remove UAT Users (comma-separated emails)</label>
               <input
-                id="mod-remove-qa"
+                id="mod-remove-uat"
                 type="text"
-                placeholder="qa1@example.com"
-                value={modRemoveQa}
-                onChange={(e) => setModRemoveQa(e.target.value)}
+                placeholder="uat1@example.com"
+                value={modRemoveUat}
+                onChange={(e) => setModRemoveUat(e.target.value)}
               />
             </div>
             <div className="dialog-actions">
@@ -573,6 +608,7 @@ export default function DrStatus() {
           </div>
         </div>
       )}
+
     </div>
   );
 }

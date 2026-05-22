@@ -139,7 +139,7 @@ export default function AdminApprovals() {
         <div className="detail-section">
           <h2>Pending edits ({pending.length})</h2>
           <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
-            Sensitive config changes (developers, qa_users, additional_objects) on already-provisioned DRs.
+            Sensitive config changes (developers, uat_users, additional_objects) on already-provisioned DRs.
           </p>
           <table className="config-table">
             <thead>

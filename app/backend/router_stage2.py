@@ -20,7 +20,10 @@ from .config import (
     validate_dr_id,
 )
 from .helpers import (
+    _audit_repo as _audit_repo_factory,
     _control_repos,
+    _dr_repo as _dr_repo_factory,
+    _obj_repo as _obj_repo_factory,
     _get_repo,
     _parse_config_in,
     _run_scan,
@@ -328,7 +331,9 @@ def get_dr_status(
     role: str = Depends(get_user_role),
 ) -> DrStatusResponse:
     """Get the full lifecycle status of a provisioned DR."""
-    dr_repo, obj_repo, _access_repo, audit_repo = _control_repos(settings)
+    dr_repo = _dr_repo_factory(settings)
+    obj_repo = _obj_repo_factory(settings)
+    audit_repo = _audit_repo_factory(settings)
 
     dr_row = dr_repo.get(db_client, dr_id=dr_id)
     if dr_row is None:
@@ -370,9 +375,6 @@ def get_dr_status(
         total_objects=len(objects),
         object_breakdown=breakdown,
         recent_audit=audit_entries,
-        rejection_comment=dr_row.get("rejection_comment"),
-        rejected_by=dr_row.get("rejected_by"),
-        rejected_at=dr_row.get("rejected_at"),
     )
 
 
@@ -390,7 +392,8 @@ def list_drs(
     role: str = Depends(get_user_role),
 ) -> DrListResponse:
     """List all provisioned DRs from the control table."""
-    dr_repo, obj_repo, _access_repo, _audit_repo = _control_repos(settings)
+    dr_repo = _dr_repo_factory(settings)
+    obj_repo = _obj_repo_factory(settings)
 
     rows = dr_repo.list_active(db_client)
     if role != "admin":
@@ -449,7 +452,7 @@ def cleanup_dr_endpoint(
     from devmirror.cleanup.cleanup_engine import cleanup_dr
 
     # Ownership check on the DR
-    dr_repo_check, _obj_check, _access_check, _audit_check = _control_repos(settings)
+    dr_repo_check = _dr_repo_factory(settings)
     dr_row = dr_repo_check.get(db_client, dr_id=dr_id)
     if dr_row is None:
         raise HTTPException(
@@ -516,7 +519,9 @@ def refresh_dr_endpoint(
     """Start a refresh (re-sync) of dev objects from production."""
     from devmirror.refresh.refresh_engine import refresh_dr
 
-    dr_repo, obj_repo, _access_repo, audit_repo = _control_repos(settings)
+    dr_repo = _dr_repo_factory(settings)
+    obj_repo = _obj_repo_factory(settings)
+    audit_repo = _audit_repo_factory(settings)
 
     # Validate DR exists and is ACTIVE/EXPIRING_SOON
     dr_row = dr_repo.get(db_client, dr_id=dr_id)

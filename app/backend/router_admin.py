@@ -13,7 +13,14 @@ from pydantic import BaseModel
 from .approvals import find_pending, list_pending
 from .auth import flush_role_cache, require_admin
 from .config import get_current_user, get_db_client, get_settings
-from .helpers import _build_yaml, _control_repos, _get_repo
+from .helpers import (
+    _access_repo,
+    _apply_uat_user_grants,
+    _audit_repo,
+    _build_yaml,
+    _get_repo,
+    _obj_repo,
+)
 
 if TYPE_CHECKING:
     from devmirror.settings import Settings
@@ -71,7 +78,7 @@ def list_approvals(
     _: None = Depends(require_admin),
 ) -> ApprovalsListResponse:
     """Return all pending admin work: edits awaiting approval AND configs awaiting provisioning."""
-    _, _, _, audit_repo = _control_repos(settings)
+    audit_repo = _audit_repo(settings)
 
     # Pending edits (Phase 2 -- audit-log staging)
     raw = list_pending(audit_repo, db_client)
@@ -141,7 +148,9 @@ def approve_edit(
 
     from .models import ConfigIn
 
-    _, obj_repo, access_repo, audit_repo = _control_repos(settings)
+    obj_repo = _obj_repo(settings)
+    access_repo = _access_repo(settings)
+    audit_repo = _audit_repo(settings)
     pending = find_pending(audit_repo, db_client, pending_edit_id)
     if pending is None:
         raise HTTPException(
@@ -218,23 +227,11 @@ def approve_edit(
                 "remove_users", dr_id, removed_devs, "dev",
                 db_client, obj_repo, access_repo,
             )
-        # UAT users get SELECT on every provisioned env (dev + qa when QA
-        # was enabled).  _manage_users short-circuits cleanly on a no-schemas
-        # env, so calling for both is safe for dev-only DRs.
-        if added_uat:
-            for env in ("dev", "qa"):
-                _manage_users(
-                    "add_users", dr_id, added_uat, env,
-                    db_client, obj_repo, access_repo,
-                    writable=False,
-                )
-        if removed_uat:
-            for env in ("dev", "qa"):
-                _manage_users(
-                    "remove_users", dr_id, removed_uat, env,
-                    db_client, obj_repo, access_repo,
-                    writable=False,
-                )
+        _apply_uat_user_grants(
+            db_client=db_client, dr_id=dr_id,
+            added=added_uat, removed=removed_uat,
+            obj_repo=obj_repo, access_repo=access_repo,
+        )
     except Exception as exc:
         # Use logger.error (no exc_info) so the proposed config payload in
         # local frame variables doesn't end up in the stack trace logs.
@@ -292,7 +289,7 @@ def reject_edit(
     """Reject a pending edit: write a CONFIG_EDIT_REJECTED audit row."""
     from devmirror.utils import now_iso
 
-    _, _, _, audit_repo = _control_repos(settings)
+    audit_repo = _audit_repo(settings)
     pending = find_pending(audit_repo, db_client, pending_edit_id)
     if pending is None:
         raise HTTPException(

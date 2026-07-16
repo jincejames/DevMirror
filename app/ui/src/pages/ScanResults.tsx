@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { getManifest, getConfig, updateManifest, startProvision, rejectConfig } from '../api';
-import { useUser } from '../UserContext';
+import { useIsAdmin, useUser } from '../UserContext';
+import { RejectionBanner } from '../components/RejectionBanner';
 import type { ConfigOut, ManifestData, ManifestObject } from '../types';
 
 export default function ScanResults() {
   const { drId } = useParams<{ drId: string }>();
   const navigate = useNavigate();
-  const { role, email } = useUser();
-  const isAdmin = role === 'admin';
+  const { email } = useUser();
+  const isAdmin = useIsAdmin();
 
   const [manifest, setManifest] = useState<ManifestData | null>(null);
   const [objects, setObjects] = useState<ManifestObject[]>([]);
@@ -129,23 +130,12 @@ export default function ScanResults() {
       )}
 
       {config?.status === 'rejected' && config.rejection_comment && (
-        <div className="banner banner-error">
-          <strong>This request was rejected.</strong>{' '}
-          {config.rejected_by && (
-            <>
-              {config.rejected_by}
-              {config.rejected_at && ` on ${config.rejected_at}`}
-              {' '}wrote:
-            </>
-          )}
-          <div style={{ marginTop: '0.5em', fontStyle: 'italic' }}>
-            &ldquo;{config.rejection_comment}&rdquo;
-          </div>
-          <small>
-            Open the config from the home page, edit it to address the
-            feedback above, and re-save to re-submit for review.
-          </small>
-        </div>
+        <RejectionBanner
+          rejectionComment={config.rejection_comment}
+          rejectedBy={config.rejected_by}
+          rejectedAt={config.rejected_at}
+          guidance="Open the config from the home page, edit it to address the feedback above, and re-save to re-submit for review."
+        />
       )}
 
       {!isAdmin && config?.status !== 'rejected' && (

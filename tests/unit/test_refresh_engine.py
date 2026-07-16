@@ -89,6 +89,38 @@ class TestGenerateObjectSql:
         with pytest.raises(Exception, match="Unknown"):
             _generate_object_sql("a.b.c", "d.e.f", "invalid")
 
+    @pytest.mark.parametrize("strategy,full", [
+        ("shallow_clone", False),
+        ("shallow_clone", True),
+        ("deep_clone", False),
+        ("deep_clone", True),
+        ("schema_only", True),
+    ])
+    def test_recreated_tables_set_catalog_managed(self, strategy, full) -> None:
+        # Refresh re-creates tables via CREATE (OR REPLACE) TABLE; the
+        # catalog-managed feature must be re-applied or it is lost.
+        joined = "; ".join(
+            _generate_object_sql("a.b.c", "d.e.f", strategy, full_refresh=full)
+        )
+        assert "delta.feature.catalogManaged" in joined
+
+    def test_truncate_refresh_omits_catalog_managed(self) -> None:
+        # Non-full schema_only is a TRUNCATE -- the existing table (and its
+        # property) is preserved, so no TBLPROPERTIES is emitted.
+        stmts = _generate_object_sql("a.b.c", "d.e.f", "schema_only", full_refresh=False)
+        assert stmts == ["TRUNCATE TABLE d.e.f"]
+
+    def test_schema_only_full_refresh_uses_like_plus_alter(self) -> None:
+        # CREATE TABLE ... LIKE drops an inline TBLPROPERTIES clause, so
+        # catalogManaged is applied via a follow-up ALTER, not inline.
+        stmts = _generate_object_sql("a.b.c", "d.e.f", "schema_only", full_refresh=True)
+        assert stmts == [
+            "DROP TABLE IF EXISTS d.e.f",
+            "CREATE TABLE d.e.f LIKE a.b.c",
+            "ALTER TABLE d.e.f SET TBLPROPERTIES "
+            "('delta.feature.catalogManaged' = 'supported')",
+        ]
+
 
 # ------------------------------------------------------------------
 # Filter

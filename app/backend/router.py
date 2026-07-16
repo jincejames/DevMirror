@@ -11,14 +11,12 @@ from databricks.sdk import WorkspaceClient
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from devmirror.modify.modification_engine import _manage_users
-
 from .auth import UserInfo, get_user_role, require_admin, require_owner_or_admin
 from .config import get_current_user, get_db_client, get_settings, validate_dr_id
 from .helpers import (
+    _audit_repo,
     _auto_scan,
     _build_yaml,
-    _control_repos,
     _get_repo,
     _parse_config_in,
     _row_to_config_out,
@@ -209,9 +207,8 @@ def update_config(
 
     # Sensitive edits on a provisioned DR -> stage for admin approval.
     if was_provisioned and has_sensitive_change(changes):
-        _, _, _, audit_repo = _control_repos(settings)
         pending_id = stage_pending_edit(
-            audit_repo,
+            _audit_repo(settings),
             db_client,
             dr_id=dr_id,
             requester=current_user,
@@ -248,85 +245,6 @@ def update_config(
         expiration_date=config_in.expiration_date,
         description=config_in.description,
     )
-
-    # Apply grants for non-sensitive access list changes on provisioned DRs.
-    # In practice access fields are sensitive (and routed through staging
-    # above), so this branch is reached only by future non-sensitive list
-    # fields. Kept for symmetry / safety.
-    if was_provisioned:
-        try:
-            old_config = _parse_config_in(existing["config_json"])
-            old_devs = set(old_config.developers or [])
-            new_devs = set(config_in.developers or [])
-            old_uat = set(old_config.uat_users or [])
-            new_uat = set(config_in.uat_users or [])
-
-            added_devs = sorted(new_devs - old_devs)
-            removed_devs = sorted(old_devs - new_devs)
-            added_uat = sorted(new_uat - old_uat)
-            removed_uat = sorted(old_uat - new_uat)
-
-            if added_devs or removed_devs or added_uat or removed_uat:
-                _dr_repo, obj_repo, access_repo, audit_repo = _control_repos(settings)
-
-                if added_devs:
-                    _manage_users(
-                        "add_users", dr_id, added_devs, "dev",
-                        db_client, obj_repo, access_repo,
-                    )
-                if removed_devs:
-                    _manage_users(
-                        "remove_users", dr_id, removed_devs, "dev",
-                        db_client, obj_repo, access_repo,
-                    )
-                # UAT users get SELECT on every provisioned env (dev + qa
-                # whenever QA was enabled).  `_manage_users` short-circuits
-                # cleanly on a no-schemas env, so calling it twice unconditionally
-                # is correct: dev-only DRs simply skip the qa pass.
-                if added_uat:
-                    for env in ("dev", "qa"):
-                        _manage_users(
-                            "add_users", dr_id, added_uat, env,
-                            db_client, obj_repo, access_repo,
-                            writable=False,
-                        )
-                if removed_uat:
-                    for env in ("dev", "qa"):
-                        _manage_users(
-                            "remove_users", dr_id, removed_uat, env,
-                            db_client, obj_repo, access_repo,
-                            writable=False,
-                        )
-
-                # Audit the diff
-                from devmirror.utils import now_iso
-                changes_audit = []
-                if added_devs or removed_devs:
-                    changes_audit.append({
-                        "field": "access.developers",
-                        "before": sorted(old_devs),
-                        "after": sorted(new_devs),
-                    })
-                if added_uat or removed_uat:
-                    changes_audit.append({
-                        "field": "access.uat_users",
-                        "before": sorted(old_uat),
-                        "after": sorted(new_uat),
-                    })
-                audit_repo.append(
-                    db_client,
-                    dr_id=dr_id,
-                    action="CONFIG_EDIT",
-                    performed_by=current_user,
-                    performed_at=now_iso(),
-                    status="SUCCESS",
-                    action_detail=json.dumps({"changes": changes_audit}),
-                )
-        except Exception as exc:
-            # Use logger.error (no exc_info) so config payloads in local
-            # frame variables don't leak via the stack trace.
-            logger.error("Failed to apply access grants on edit for %s: %s", dr_id, exc)
-            # Non-fatal: the config row is already saved. Surface via audit.
 
     # Auto-scan if config is valid (not provisioned -- provisioned configs use re-provision)
     if status == "valid" and _dm_config is not None:
@@ -429,8 +347,7 @@ def reject_config(
     # in audit_log alongside the lifecycle events.  Audit failure must not
     # roll back the rejection (the config row is already updated).
     try:
-        _, _, _, audit_repo = _control_repos(settings)
-        audit_repo.append(
+        _audit_repo(settings).append(
             db_client,
             dr_id=dr_id,
             action="REJECT",

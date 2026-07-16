@@ -10,10 +10,11 @@ import {
 } from '../api';
 import type { ConfigIn, FieldError } from '../types';
 import MultiInput from '../components/MultiInput';
+import { RejectionBanner } from '../components/RejectionBanner';
 import RevisionSelector from '../components/RevisionSelector';
 import StreamSearch from '../components/StreamSearch';
 import ValidationBanner from '../components/ValidationBanner';
-import { useUser } from '../UserContext';
+import { useIsAdmin, useUser } from '../UserContext';
 
 // US-34: dr_id is assigned server-side on create; the field is not on
 // the form.  When editing we overwrite EMPTY_FORM with the fetched config
@@ -38,7 +39,8 @@ export default function ConfigForm() {
   const { drId } = useParams<{ drId: string }>();
   const isEdit = Boolean(drId);
   const navigate = useNavigate();
-  const { role, email } = useUser();
+  const { email } = useUser();
+  const isAdmin = useIsAdmin();
 
   const [form, setForm] = useState<ConfigIn>({ ...EMPTY_FORM });
   // Raw textarea content for additional_objects, kept separate from
@@ -184,7 +186,7 @@ export default function ConfigForm() {
           setErrors(out.validation_errors);
           setIsValid(true);
           setShowBanner(true);
-        } else if (role === 'user') {
+        } else if (!isAdmin) {
           // Non-admin: show pending review banner instead of navigating away.
           // US-34: on a fresh create, jump to the edit route so the
           // server-assigned dr_id is visible in both URL and page title.
@@ -352,28 +354,17 @@ export default function ConfigForm() {
         </button>
       </div>
 
-      {role === 'admin' && createdBy && createdBy !== email && (
+      {isAdmin && createdBy && createdBy !== email && (
         <div className="owner-label">Owner: {createdBy}</div>
       )}
 
       {isRejected && rejectionComment && (
-        <div className="banner banner-error">
-          <strong>This request was rejected.</strong>{' '}
-          {rejectedBy && (
-            <>
-              {rejectedBy}
-              {rejectedAt && ` on ${rejectedAt}`}
-              {' '}wrote:
-            </>
-          )}
-          <div style={{ marginTop: '0.5em', fontStyle: 'italic' }}>
-            &ldquo;{rejectionComment}&rdquo;
-          </div>
-          <small>
-            Edit the request below to address the feedback and re-save to
-            re-submit for review.
-          </small>
-        </div>
+        <RejectionBanner
+          rejectionComment={rejectionComment}
+          rejectedBy={rejectedBy}
+          rejectedAt={rejectedAt}
+          guidance="Edit the request below to address the feedback and re-save to re-submit for review."
+        />
       )}
 
       {isProvisioned && (
@@ -594,7 +585,7 @@ export default function ConfigForm() {
               Re-validate
             </button>
           )}
-          {isEdit && isProvisioned && role === 'admin' && (
+          {isEdit && isProvisioned && isAdmin && (
             <button
               type="button"
               onClick={handleReprovision}

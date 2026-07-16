@@ -70,10 +70,11 @@ def _manifest(objects=None, schemas=None):
     }}
 
 
+from .conftest import make_mock_db
+
+
 def _mock_db() -> MagicMock:
-    m = MagicMock()
-    m.sql_exec = MagicMock()
-    m.sql = MagicMock(return_value=[])
+    m = make_mock_db()
     m.create_schema = MagicMock()
     m.grant = MagicMock()
     m.revoke = MagicMock()

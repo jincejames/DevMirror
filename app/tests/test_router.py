@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from .conftest import make_db_row, valid_config_payload
@@ -360,21 +361,33 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
 
     @staticmethod
     def _patch_control_repos():
-        """Patch _control_repos to return mocks for the four repos."""
+        """Patch the four per-repo factories to return mocks.
+
+        Returns a context manager that, when entered, patches each
+        factory on backend.router.  The returned tuple matches the old
+        4-repo shape so existing call sites keep working.
+        """
         mock_dr = MagicMock()
         mock_obj = MagicMock()
         mock_access = MagicMock()
         mock_audit = MagicMock()
-        return (
-            patch(
-                "backend.router._control_repos",
-                return_value=(mock_dr, mock_obj, mock_access, mock_audit),
-            ),
-            mock_dr,
-            mock_obj,
-            mock_access,
-            mock_audit,
-        )
+
+        class _PatchCtx:
+            def __enter__(self_inner):
+                self_inner._stack = ExitStack().__enter__()
+                # `create=True` so the patch works even when the test target
+                # didn't import a specific factory (e.g. router.py never
+                # touches the DR repo directly -- it stages instead).
+                self_inner._stack.enter_context(patch("backend.router._dr_repo", return_value=mock_dr, create=True))
+                self_inner._stack.enter_context(patch("backend.router._obj_repo", return_value=mock_obj, create=True))
+                self_inner._stack.enter_context(patch("backend.router._access_repo", return_value=mock_access, create=True))
+                self_inner._stack.enter_context(patch("backend.router._audit_repo", return_value=mock_audit))
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return self_inner._stack.__exit__(*exc)
+
+        return _PatchCtx(), mock_dr, mock_obj, mock_access, mock_audit
 
     def test_add_developer_stages_pending_not_grants(self, client, mock_db):
         """Adding a developer stages a pending edit; no grants run on PUT."""
@@ -383,7 +396,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
 
         payload = valid_config_payload(developers=["alice@co.com", "bob@co.com"])
         ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users") as mock_manage:
+        with ctx, patch("backend.router._manage_users", create=True) as mock_manage:
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 202
@@ -401,7 +414,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
 
         payload = valid_config_payload(developers=["alice@co.com"])
         ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users") as mock_manage:
+        with ctx, patch("backend.router._manage_users", create=True) as mock_manage:
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 202
@@ -419,7 +432,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             uat_users=["uat1@co.com", "uat3@co.com"],
         )
         ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users") as mock_manage:
+        with ctx, patch("backend.router._manage_users", create=True) as mock_manage:
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 202
@@ -436,7 +449,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             description="Just updating the description",
         )
         ctx, _dr, _obj, _access, _audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users") as mock_manage:
+        with ctx, patch("backend.router._manage_users", create=True) as mock_manage:
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 200
@@ -456,7 +469,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
         payload = valid_config_payload(
             developers=["alice@co.com", "bob@co.com"]
         )
-        with patch("backend.router._manage_users") as mock_manage:
+        with patch("backend.router._manage_users", create=True) as mock_manage:
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 200
@@ -473,7 +486,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             developers=["alice@co.com", "bob@co.com"]
         )
         ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users"):
+        with ctx, patch("backend.router._manage_users", create=True):
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 202
@@ -504,7 +517,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             developers=["alice@co.com", "bob@co.com"]
         )
         ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users"):
+        with ctx, patch("backend.router._manage_users", create=True):
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 202
@@ -528,7 +541,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             additional_objects=["prod.schema.extra_table"],
         )
         ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users") as mock_manage:
+        with ctx, patch("backend.router._manage_users", create=True) as mock_manage:
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 202
@@ -557,7 +570,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             description="Just a description tweak",
         )
         ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users"):
+        with ctx, patch("backend.router._manage_users", create=True):
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 200
@@ -580,7 +593,7 @@ class TestUpdateProvisionedSensitiveEditStagesPending:
             developers=["alice@co.com", "bob@co.com"]
         )
         ctx, _dr, _obj, _access, mock_audit = self._patch_control_repos()
-        with ctx, patch("backend.router._manage_users"):
+        with ctx, patch("backend.router._manage_users", create=True):
             resp = client.put("/api/configs/DR-1042", json=payload)
 
         assert resp.status_code == 200

@@ -44,3 +44,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
 export function useUser(): UserContextValue {
   return useContext(UserContext);
 }
+
+export function useIsAdmin(): boolean {
+  return useContext(UserContext).role === 'admin';
+}

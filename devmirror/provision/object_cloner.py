@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 # Safe identifier pattern for three-part FQNs.
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z0-9_]+$")
 
+# Delta table feature that marks a clone target catalog-managed. Table-level
+# feature only -- NOT valid on views, volumes, or UC schemas.
+_CATALOG_MANAGED_PROP = "'delta.feature.catalogManaged' = 'supported'"
+
+# Inline clause appended to the SHALLOW/DEEP CLONE builders. Verified against
+# the LH pre-prod workspace (both interactively and via the Statement Execution
+# API the app uses): `CREATE [OR REPLACE] TABLE ... CLONE ... TBLPROPERTIES(...)`
+# honors the clause and the resulting table is catalog-managed. NOTE:
+# `CREATE TABLE ... LIKE` does NOT -- it silently drops the clause -- so the
+# schema_only path applies the feature via a follow-up ALTER (see
+# set_catalog_managed_sql) instead of this inline form.
+CATALOG_MANAGED_TBLPROPERTIES = f" TBLPROPERTIES ({_CATALOG_MANAGED_PROP})"
+
 VALID_STRATEGIES = frozenset(
     {"shallow_clone", "deep_clone", "view", "schema_only", "create_volume"}
 )
@@ -78,7 +91,10 @@ def create_shallow_clone_sql(
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     rev = _revision_clause(data_revision)
-    return f"CREATE OR REPLACE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"
+    return (
+        f"CREATE OR REPLACE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"
+        f"{CATALOG_MANAGED_TBLPROPERTIES}"
+    )
 
 
 def create_deep_clone_sql(
@@ -90,7 +106,10 @@ def create_deep_clone_sql(
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     rev = _revision_clause(data_revision)
-    return f"CREATE OR REPLACE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"
+    return (
+        f"CREATE OR REPLACE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"
+        f"{CATALOG_MANAGED_TBLPROPERTIES}"
+    )
 
 
 def create_view_sql(
@@ -109,10 +128,28 @@ def create_schema_only_sql(
     source_fqn: str,
     target_fqn: str,
 ) -> str:
-    """Generate SQL for a schema-only (empty) table."""
+    """Generate SQL for a schema-only (empty) table.
+
+    ``CREATE TABLE ... LIKE`` silently ignores an inline ``TBLPROPERTIES``
+    clause (verified on LH pre-prod), so catalog-managed is applied via a
+    separate ``ALTER`` -- see ``set_catalog_managed_sql``.
+    """
     _validate_fqn(source_fqn, "source_fqn")
     _validate_fqn(target_fqn, "target_fqn")
     return f"CREATE TABLE {target_fqn} LIKE {source_fqn}"
+
+
+def set_catalog_managed_sql(target_fqn: str) -> str:
+    """Generate an ALTER that marks an existing table catalog-managed.
+
+    Used for the ``schema_only`` (``CREATE TABLE ... LIKE``) path, where an
+    inline ``TBLPROPERTIES`` clause is silently dropped. A LIKE-created table
+    is a fresh managed table (not a clone), so ``ALTER TABLE ... SET
+    TBLPROPERTIES`` reliably sets the feature and is NOT affected by the
+    shallow-clone ALTER limitation (SUP-32492); verified on LH pre-prod.
+    """
+    _validate_fqn(target_fqn, "target_fqn")
+    return f"ALTER TABLE {target_fqn} SET TBLPROPERTIES ({_CATALOG_MANAGED_PROP})"
 
 
 def create_volume_sql(target_fqn: str) -> str:
@@ -221,6 +258,17 @@ def execute_clone(
             # Carve out the fixed sideload layout (source/{data,archive,ready}).
             # Best-effort: directory creation failures are warnings, not errors.
             provision_volume_subdirs(db_client, target_fqn)
+        elif strategy == "schema_only":
+            # `CREATE TABLE ... LIKE` drops an inline TBLPROPERTIES clause, so
+            # mark the fresh (non-clone) table catalog-managed via a follow-up
+            # ALTER.  Best-effort: a failure here does not fail the clone.
+            try:
+                db_client.sql_exec(set_catalog_managed_sql(target_fqn))
+            except Exception as exc:
+                logger.warning(
+                    "Failed to set catalogManaged on schema_only table %s: %s",
+                    target_fqn, exc,
+                )
         return CloneResult(
             source_fqn=source_fqn,
             target_fqn=target_fqn,

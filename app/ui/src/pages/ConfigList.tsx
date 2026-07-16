@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { listConfigs, deleteConfig, exportYaml, scanConfig, reprovisionDr } from '../api';
-import { useUser } from '../UserContext';
+import { useIsAdmin } from '../UserContext';
 import type { ConfigListItem } from '../types';
 
 export default function ConfigList() {
@@ -9,8 +9,7 @@ export default function ConfigList() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
-  const { role } = useUser();
-  const isAdmin = role === 'admin';
+  const isAdmin = useIsAdmin();
 
   async function load() {
     setLoading(true);

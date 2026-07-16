@@ -14,15 +14,12 @@ from devmirror.control.audit import AuditRepository
 FQN_PREFIX = "dev_analytics.devmirror_admin"
 
 
+from .conftest import make_mock_db
+
+
 class TestAuditRepository:
     def _mock_db(self) -> MagicMock:
-        m = MagicMock()
-        m.sql_exec = MagicMock()
-        m.sql_exec_with_params = MagicMock()
-        m.sql = MagicMock(return_value=[])
-        # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
-        m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
-        return m
+        return make_mock_db()
 
     def test_table_fqn(self) -> None:
         repo = AuditRepository(FQN_PREFIX)

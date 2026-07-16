@@ -424,8 +424,6 @@ class TestGetDrStatus:
         assert data["total_objects"] == 2
         assert data["object_breakdown"]["PROVISIONED"] == 2
         assert len(data["recent_audit"]) == 1
-        # No rejection metadata on an ACTIVE DR.
-        assert data["rejection_comment"] is None
         # Owner falls back to dr_row's value when no config row is found.
         assert data["created_by"] == "dr-row@example.com"
 
@@ -458,33 +456,6 @@ class TestGetDrStatus:
         resp = client.get("/api/drs/DR-1042/status")
         assert resp.status_code == 200
         assert resp.json()["created_by"] == "requester@example.com"
-
-    @patch(_CONTROL_REPO_PATCHES[0])
-    @patch(_CONTROL_REPO_PATCHES[1])
-    @patch(_CONTROL_REPO_PATCHES[2])
-    def test_dr_status_surfaces_rejection_metadata(
-        self, MockDRRepo, MockObjRepo, MockAuditRepo, client, mock_db,
-    ):
-        MockDRRepo.return_value.get.return_value = {
-            "dr_id": "DR-1042", "status": "REJECTED", "description": None,
-            "expiration_date": "2026-06-01", "created_at": "2026-04-01T00:00:00",
-            "created_by": "requester@example.com",
-            "last_refreshed_at": None,
-            "rejection_comment": "Doesn't follow naming convention",
-            "rejected_by": "admin@example.com",
-            "rejected_at": "2026-05-22T10:00:00Z",
-        }
-        MockObjRepo.return_value.list_by_dr_id.return_value = []
-        MockAuditRepo.return_value.list_by_dr_id.return_value = []
-        mock_db.sql.return_value = []
-
-        resp = client.get("/api/drs/DR-1042/status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "REJECTED"
-        assert data["rejection_comment"] == "Doesn't follow naming convention"
-        assert data["rejected_by"] == "admin@example.com"
-        assert data["rejected_at"] == "2026-05-22T10:00:00Z"
 
     @patch("devmirror.control.control_table.DRRepository")
     def test_dr_status_not_found(self, MockDRRepo, client, mock_db):

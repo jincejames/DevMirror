@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { getDrStatus, cleanupDr, refreshDr, reprovisionDr, modifyDr } from '../api';
-import { useUser } from '../UserContext';
+import { useIsAdmin, useUser } from '../UserContext';
+import { CleanupResultBanner } from '../components/CleanupResultBanner';
 import type { DrStatusResponse, CleanupResponse, ModifyDrRequest } from '../types';
 
 function statusBadgeClass(status: string): string {
@@ -17,7 +18,8 @@ type RefreshMode = 'incremental' | 'full' | 'selective';
 export default function DrStatus() {
   const { drId } = useParams<{ drId: string }>();
   const navigate = useNavigate();
-  const { role, email } = useUser();
+  const { email } = useUser();
+  const isAdmin = useIsAdmin();
   const [data, setData] = useState<DrStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -165,7 +167,6 @@ export default function DrStatus() {
   if (error) return <p className="error-text">{error}</p>;
   if (!data) return <p className="error-text">No data.</p>;
 
-  const isAdmin = role === 'admin';
   const isOwner = data.created_by === email;
   const canModify =
     (isOwner || isAdmin) &&
@@ -185,47 +186,7 @@ export default function DrStatus() {
         <div className="owner-label">Owner: {data.created_by}</div>
       )}
 
-      {cleanupResult && (() => {
-        const objF = cleanupResult.objects_failed ?? [];
-        const schF = cleanupResult.schemas_failed ?? [];
-        const revF = cleanupResult.revokes_failed ?? [];
-        const totalFailed = objF.length + schF.length + revF.length;
-        if (totalFailed === 0) {
-          return (
-            <div className="banner banner-success">
-              Cleanup complete: {cleanupResult.objects_dropped} objects dropped,{' '}
-              {cleanupResult.schemas_dropped} schemas dropped,{' '}
-              {cleanupResult.revokes_succeeded} revokes succeeded.
-            </div>
-          );
-        }
-        const renderList = (label: string, items: typeof objF) =>
-          items.length > 0 && (
-            <details style={{ marginTop: '0.5em' }}>
-              <summary>
-                {label}: {items.length} couldn&apos;t be processed
-              </summary>
-              <ul style={{ margin: '0.25em 0 0 1em', padding: 0 }}>
-                {items.map((f, i) => (
-                  <li key={`${label}-${i}`}>
-                    <code>{f.fqn}</code>: {f.error}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          );
-        return (
-          <div className="banner banner-warning">
-            <strong>Partial cleanup</strong> — {totalFailed} item{totalFailed === 1 ? '' : 's'}{' '}
-            could not be processed (likely UC permission). Successful:{' '}
-            {cleanupResult.objects_dropped} objects, {cleanupResult.schemas_dropped} schemas,{' '}
-            {cleanupResult.revokes_succeeded} revokes.
-            {renderList('Schemas', schF)}
-            {renderList('Objects', objF)}
-            {renderList('Revokes', revF)}
-          </div>
-        );
-      })()}
+      {cleanupResult && <CleanupResultBanner result={cleanupResult} />}
 
       {modifySuccess && (
         <div className="banner banner-success">

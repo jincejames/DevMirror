@@ -7,6 +7,7 @@ and ``POST /api/admin/approvals/{id}/reject``.
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -77,7 +78,7 @@ def _resolved_audit_row(
 
 
 def _patch_admin_repos(audit_rows: dict[str, list[dict]]):
-    """Build a ``patch(...)`` context for ``backend.router_admin._control_repos``.
+    """Patch the per-repo factories on ``backend.router_admin``.
 
     *audit_rows* maps action -> list of rows to be returned by
     ``audit_repo.list_by_action(action=<action>)``.
@@ -91,11 +92,22 @@ def _patch_admin_repos(audit_rows: dict[str, list[dict]]):
     mock_audit.list_by_action = MagicMock(
         side_effect=lambda _db, action: list(audit_rows.get(action, []))
     )
-    ctx = patch(
-        "backend.router_admin._control_repos",
-        return_value=(mock_dr, mock_obj, mock_access, mock_audit),
-    )
-    return ctx, mock_dr, mock_obj, mock_access, mock_audit
+
+    class _PatchCtx:
+        def __enter__(self_inner):
+            self_inner._stack = ExitStack().__enter__()
+            # `create=True` so the patch works even when router_admin didn't
+            # import a specific factory.
+            self_inner._stack.enter_context(patch("backend.router_admin._dr_repo", return_value=mock_dr, create=True))
+            self_inner._stack.enter_context(patch("backend.router_admin._obj_repo", return_value=mock_obj))
+            self_inner._stack.enter_context(patch("backend.router_admin._access_repo", return_value=mock_access))
+            self_inner._stack.enter_context(patch("backend.router_admin._audit_repo", return_value=mock_audit))
+            return self_inner
+
+        def __exit__(self_inner, *exc):
+            return self_inner._stack.__exit__(*exc)
+
+    return _PatchCtx(), mock_dr, mock_obj, mock_access, mock_audit
 
 
 # ---------------------------------------------------------------------------

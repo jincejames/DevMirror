@@ -27,13 +27,11 @@ _OBJS = [
 ]
 
 
+from .conftest import make_mock_db
+
+
 def _mock_db() -> MagicMock:
-    m = MagicMock()
-    m.sql_exec = MagicMock()
-    m.sql_exec_with_params = MagicMock()
-    m.sql = MagicMock(return_value=[])
-    # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
-    m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
+    m = make_mock_db()
     m.delete_table = MagicMock()
     m.delete_schema = MagicMock()
     m.revoke = MagicMock()

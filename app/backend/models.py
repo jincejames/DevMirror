@@ -314,9 +314,6 @@ class DrStatusResponse(BaseModel):
     DRRepository row's ``created_by`` if the runner mis-recorded it as the
     first developer in the access list; that legacy quirk is reconciled at
     response-build time so the UI always shows the requester.
-
-    The four ``rejection_*`` fields are populated only when ``status`` is
-    ``REJECTED`` and surface the admin's rationale in the UI.
     """
 
     dr_id: str
@@ -330,9 +327,6 @@ class DrStatusResponse(BaseModel):
     total_objects: int
     object_breakdown: dict[str, int]
     recent_audit: list[dict]
-    rejection_comment: str | None = None
-    rejected_by: str | None = None
-    rejected_at: str | None = None
 
 
 class DrListItem(BaseModel):

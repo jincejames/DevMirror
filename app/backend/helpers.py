@@ -203,16 +203,69 @@ def _validate_config(config_in: ConfigIn) -> tuple[str, list[FieldError], object
 
 
 def _control_repos(settings: Settings):
-    """Build the four control-table repositories from *settings*."""
-    from devmirror.control.audit import AuditRepository
-    from devmirror.control.control_table import (
-        DrAccessRepository,
-        DRRepository,
-        DrObjectRepository,
+    """Build the four control-table repositories from *settings*.
+
+    Reserved for the handful of call sites that genuinely need all
+    four repos in one call.  Prefer the per-repo factories below for
+    everything else -- they avoid the `_, _, _, audit_repo = ...`
+    discards that pile up around audit-only writes.
+    """
+    return (
+        _dr_repo(settings),
+        _obj_repo(settings),
+        _access_repo(settings),
+        _audit_repo(settings),
     )
 
-    fqn = settings.control_fqn_prefix
-    return DRRepository(fqn), DrObjectRepository(fqn), DrAccessRepository(fqn), AuditRepository(fqn)
+
+def _dr_repo(settings: Settings):
+    from devmirror.control.control_table import DRRepository
+    return DRRepository(settings.control_fqn_prefix)
+
+
+def _obj_repo(settings: Settings):
+    from devmirror.control.control_table import DrObjectRepository
+    return DrObjectRepository(settings.control_fqn_prefix)
+
+
+def _access_repo(settings: Settings):
+    from devmirror.control.control_table import DrAccessRepository
+    return DrAccessRepository(settings.control_fqn_prefix)
+
+
+def _audit_repo(settings: Settings):
+    from devmirror.control.audit import AuditRepository
+    return AuditRepository(settings.control_fqn_prefix)
+
+
+def _apply_uat_user_grants(
+    *,
+    db_client: DbClient,
+    dr_id: str,
+    added: list[str],
+    removed: list[str],
+    obj_repo,
+    access_repo,
+) -> None:
+    """Apply a UAT-user delta on every provisioned env (dev + qa).
+
+    UAT users get SELECT on every env they touch; ``_manage_users``
+    short-circuits cleanly when an env has no schemas, so calling for
+    both envs is safe even on dev-only DRs.
+    """
+    from devmirror.modify.modification_engine import _manage_users
+
+    for env in ("dev", "qa"):
+        if added:
+            _manage_users(
+                "add_users", dr_id, added, env,
+                db_client, obj_repo, access_repo, writable=False,
+            )
+        if removed:
+            _manage_users(
+                "remove_users", dr_id, removed, env,
+                db_client, obj_repo, access_repo, writable=False,
+            )
 
 
 def _run_scan(db_client: DbClient, settings: Settings, dm_config, target_catalog: str | None = None) -> dict:
@@ -257,24 +310,22 @@ def _run_scan(db_client: DbClient, settings: Settings, dm_config, target_catalog
 
     # Determine baseline catalog(s) -- the catalogs the streams' resolved
     # objects live in. If additional_objects reference a different catalog,
-    # flag them as non-prod for admin review.
+    # flag them as non-prod for admin review.  Skip objects from
+    # additional_objects when establishing baselines so they can't validate
+    # themselves.
     additional_set = set(dr.additional_objects or [])
-    baseline_catalogs: set[str] = set()
-    for obj in classification.objects:
-        if obj.fqn in additional_set:
-            # Skip objects that came from additional_objects; we don't want
-            # to treat their own catalog as a baseline.
-            continue
-        parts = obj.fqn.split(".")
-        if len(parts) == 3:
-            baseline_catalogs.add(parts[0])
-
-    non_prod_additional: list[str] = []
-    if baseline_catalogs:
-        for fqn in additional_set:
-            parts = fqn.split(".")
-            if len(parts) == 3 and parts[0] not in baseline_catalogs:
-                non_prod_additional.append(fqn)
+    baseline_catalogs = {
+        obj.fqn.split(".")[0]
+        for obj in classification.objects
+        if obj.fqn not in additional_set and obj.fqn.count(".") == 2
+    }
+    non_prod_additional: list[str] = (
+        [
+            fqn for fqn in additional_set
+            if fqn.count(".") == 2 and fqn.split(".")[0] not in baseline_catalogs
+        ]
+        if baseline_catalogs else []
+    )
 
     manifest = build_manifest(
         dr_id=dr.dr_id,

@@ -9,7 +9,13 @@ from datetime import date
 from typing import TYPE_CHECKING, Any, Literal
 
 from devmirror.control.control_table import DRStatus, ObjectStatus
-from devmirror.provision.object_cloner import ClonerError, _revision_clause, _validate_fqn
+from devmirror.provision.object_cloner import (
+    CATALOG_MANAGED_TBLPROPERTIES,
+    ClonerError,
+    _revision_clause,
+    _validate_fqn,
+    set_catalog_managed_sql,
+)
 from devmirror.utils import TaskResult, now_iso, run_bounded
 from devmirror.utils.validation import validate_delta_retention
 
@@ -70,17 +76,25 @@ def _generate_object_sql(
         if full_refresh:
             return [
                 f"DROP TABLE IF EXISTS {target_fqn}",
-                f"CREATE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}",
+                f"CREATE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"
+                f"{CATALOG_MANAGED_TBLPROPERTIES}",
             ]
-        return [f"CREATE OR REPLACE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"]
+        return [
+            f"CREATE OR REPLACE TABLE {target_fqn} SHALLOW CLONE {source_fqn}{rev}"
+            f"{CATALOG_MANAGED_TBLPROPERTIES}"
+        ]
 
     if strategy == "deep_clone":
         if full_refresh:
             return [
                 f"DROP TABLE IF EXISTS {target_fqn}",
-                f"CREATE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}",
+                f"CREATE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"
+                f"{CATALOG_MANAGED_TBLPROPERTIES}",
             ]
-        return [f"CREATE OR REPLACE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"]
+        return [
+            f"CREATE OR REPLACE TABLE {target_fqn} DEEP CLONE {source_fqn}{rev}"
+            f"{CATALOG_MANAGED_TBLPROPERTIES}"
+        ]
 
     if strategy == "view":
         if full_refresh:
@@ -92,9 +106,12 @@ def _generate_object_sql(
 
     if strategy == "schema_only":
         if full_refresh:
+            # `CREATE TABLE ... LIKE` drops an inline TBLPROPERTIES clause, so
+            # apply catalog-managed via a follow-up ALTER on the fresh table.
             return [
                 f"DROP TABLE IF EXISTS {target_fqn}",
                 f"CREATE TABLE {target_fqn} LIKE {source_fqn}",
+                set_catalog_managed_sql(target_fqn),
             ]
         return [f"TRUNCATE TABLE {target_fqn}"]
 

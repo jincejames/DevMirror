@@ -22,14 +22,7 @@ from devmirror.control.control_table import (
 FQN = "dev_analytics.devmirror_admin"
 
 
-def _mock_db() -> MagicMock:
-    m = MagicMock()
-    m.sql_exec = MagicMock()
-    m.sql_exec_with_params = MagicMock()
-    m.sql = MagicMock(return_value=[])
-    # Wire sql_with_params to delegate to sql so existing return_value/side_effect work
-    m.sql_with_params.side_effect = lambda stmt, params: m.sql(stmt, params)
-    return m
+from .conftest import make_mock_db as _mock_db
 
 
 # ------------------------------------------------------------------
@@ -437,37 +430,48 @@ class TestDrAccessRepository:
 # ------------------------------------------------------------------
 
 class TestDDL:
+    # Tables every migration set must produce.  The exact statement count
+    # is not asserted -- it grows whenever a migration or ALTER is added,
+    # and historical churn on this number caused friction.  Content checks
+    # are stable signals.
+    _REQUIRED_TABLES = [
+        "fastsetup_development_requests",
+        "fastsetup_dr_objects",
+        "fastsetup_dr_access",
+        "audit_log",
+        "fastsetup_configs",
+        "fastsetup_id_counter",
+    ]
+
     def test_render_ddl(self) -> None:
-        # render_ddl now concatenates every migration in devmirror/migrations/
-        # (001 + 002 + 003), so it emits all six control-plane tables PLUS
-        # two forward-compat ALTERs that add rejection columns to
-        # fastsetup_development_requests (legacy planned reject path) and
-        # fastsetup_configs (current canonical reject path).  Total: 8.
         stmts = render_ddl("c", "s")
-        assert len(stmts) == 8
         joined = "\n".join(stmts)
-        for name in [
-            "fastsetup_development_requests",
-            "fastsetup_dr_objects",
-            "fastsetup_dr_access",
-            "audit_log",
-            "fastsetup_configs",
-            "fastsetup_id_counter",
-        ]:
-            assert name in joined
+        # Exactly one CREATE statement per required table (catches a dropped
+        # or duplicated CREATE without hardcoding a brittle total).
+        creates = [s for s in stmts if s.lstrip().upper().startswith("CREATE ")]
+        assert len(creates) == len(self._REQUIRED_TABLES)
+        for name in self._REQUIRED_TABLES:
+            assert sum(1 for s in creates if name in s) == 1, name
+        # Every statement is either a CREATE or an ALTER -- so the total is
+        # accounted for and no unexpected statement type sneaks in.
+        alters = [s for s in stmts if s.lstrip().upper().startswith("ALTER ")]
+        assert len(creates) + len(alters) == len(stmts)
         # Rejection columns land via both CREATE (new deploys) and an
         # idempotent ALTER (existing deploys).
         assert "rejection_comment" in joined
         assert "rejected_by" in joined
         assert "rejected_at" in joined
-        assert "ALTER TABLE" in joined
+        assert len(alters) >= 1
         assert "{control_catalog}" not in joined
 
     def test_apply_ddl(self) -> None:
         db, settings = _mock_db(), MagicMock()
         settings.control_catalog = "c"
         settings.control_schema = "s"
-        assert len(apply_control_ddl(db, settings)) == 8
+        # apply_control_ddl returns the list of executed statements.  It
+        # should match render_ddl's output one-for-one when nothing fails.
+        expected = len(render_ddl("c", "s"))
+        assert len(apply_control_ddl(db, settings)) == expected
 
     def test_apply_ddl_is_best_effort_on_per_statement_failure(self) -> None:
         # ALTER TABLE ADD COLUMNS fails on a second run because the columns
@@ -476,10 +480,15 @@ class TestDDL:
         db, settings = MagicMock(), MagicMock()
         settings.control_catalog = "c"
         settings.control_schema = "s"
-        # Mid-loop failure on the 4th statement; later ones must still run.
-        outcomes = [None, None, None, RuntimeError("boom"), None, None, None, None]
+        total = len(render_ddl("c", "s"))
+        assert total >= 2, "need at least two statements to test a mid-loop failure"
+        # Fail one statement mid-loop; later ones must still run.  Index is
+        # clamped so a future migration consolidation can't turn this into an
+        # IndexError.
+        fail_idx = min(3, total - 1)
+        outcomes: list = [None] * total
+        outcomes[fail_idx] = RuntimeError("boom")
         db.sql_exec = MagicMock(side_effect=outcomes)
         applied = apply_control_ddl(db, settings)
-        # All 8 statements were attempted; 7 succeeded, 1 swallowed.
-        assert len(applied) == 7
-        assert db.sql_exec.call_count == 8
+        assert len(applied) == total - 1
+        assert db.sql_exec.call_count == total

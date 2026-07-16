@@ -23,6 +23,7 @@ from devmirror.provision.object_cloner import (
     generate_clone_sql,
     provision_schemas,
     provision_volume_subdirs,
+    set_catalog_managed_sql,
 )
 
 # ------------------------------------------------------------------
@@ -34,10 +35,11 @@ _REV_V = DataRevision(mode="version", version=42)
 _REV_TS = DataRevision(mode="timestamp", timestamp="2026-04-01T00:00:00Z")
 
 
+from .conftest import make_mock_db
+
+
 def _mock_db() -> MagicMock:
-    m = MagicMock()
-    m.sql_exec = MagicMock()
-    m.sql = MagicMock(return_value=[])
+    m = make_mock_db()
     m.create_schema = MagicMock()
     return m
 
@@ -83,6 +85,38 @@ class TestCloneSql:
     def test_rejects_unsafe_chars(self) -> None:
         with pytest.raises(ClonerError, match="Unsafe"):
             create_shallow_clone_sql("a.b.c; DROP TABLE", "d.e.f")
+
+    @pytest.mark.parametrize("fn", [
+        create_shallow_clone_sql,
+        create_deep_clone_sql,
+    ])
+    def test_clone_builders_set_catalog_managed_inline(self, fn) -> None:
+        # SHALLOW/DEEP CLONE honor an inline TBLPROPERTIES clause.
+        assert "delta.feature.catalogManaged" in fn(_SRC, _TGT)
+
+    def test_schema_only_omits_inline_catalog_managed(self) -> None:
+        # `CREATE TABLE ... LIKE` silently drops an inline TBLPROPERTIES clause,
+        # so the builder must NOT emit it (the ALTER follow-up handles it).
+        sql = create_schema_only_sql(_SRC, _TGT)
+        assert "catalogManaged" not in sql
+        assert "LIKE" in sql
+
+    def test_set_catalog_managed_sql(self) -> None:
+        sql = set_catalog_managed_sql(_TGT)
+        assert sql.startswith("ALTER TABLE")
+        assert "delta.feature.catalogManaged" in sql
+
+    @pytest.mark.parametrize("fn", [create_view_sql, create_volume_sql])
+    def test_non_table_builders_omit_catalog_managed(self, fn) -> None:
+        # Views/volumes are not Delta tables -- the property is invalid there.
+        sql = fn(_TGT) if fn is create_volume_sql else fn(_SRC, _TGT)
+        assert "catalogManaged" not in sql
+
+    def test_catalog_managed_after_revision_clause(self) -> None:
+        # The TBLPROPERTIES clause must follow the VERSION/TIMESTAMP AS OF suffix.
+        sql = create_shallow_clone_sql(_SRC, _TGT, data_revision=_REV_V)
+        assert "VERSION AS OF 42" in sql
+        assert sql.index("VERSION AS OF 42") < sql.index("catalogManaged")
 
 
 class TestGenerateCloneSql:
@@ -135,6 +169,25 @@ class TestExecuteClone:
     def test_with_revision(self) -> None:
         r = execute_clone(_mock_db(), "a.b.c", "d.e.f", "shallow_clone", _REV_V)
         assert "VERSION AS OF 42" in r.sql
+
+    def test_schema_only_runs_followup_alter(self) -> None:
+        # schema_only executes CREATE TABLE ... LIKE then a follow-up ALTER to
+        # mark the fresh table catalog-managed (LIKE drops the inline clause).
+        db = _mock_db()
+        r = execute_clone(db, "a.b.c", "d.e.f", "schema_only")
+        assert r.success
+        executed = [c.args[0] for c in db.sql_exec.call_args_list]
+        assert any(s.startswith("CREATE TABLE") and "LIKE" in s for s in executed)
+        assert any(
+            s.startswith("ALTER TABLE") and "catalogManaged" in s for s in executed
+        )
+
+    def test_schema_only_alter_failure_is_nonfatal(self) -> None:
+        # A failure on the follow-up ALTER must not fail the clone itself.
+        db = _mock_db()
+        db.sql_exec.side_effect = [None, Exception("alter denied")]
+        r = execute_clone(db, "a.b.c", "d.e.f", "schema_only")
+        assert r.success
 
 
 # ------------------------------------------------------------------

@@ -14,7 +14,7 @@ from devmirror.provision.object_cloner import (
     ClonerError,
     _revision_clause,
     _validate_fqn,
-    set_catalog_managed_sql,
+    apply_catalog_managed_best_effort,
 )
 from devmirror.utils import TaskResult, now_iso, run_bounded
 from devmirror.utils.validation import validate_delta_retention
@@ -106,12 +106,13 @@ def _generate_object_sql(
 
     if strategy == "schema_only":
         if full_refresh:
-            # `CREATE TABLE ... LIKE` drops an inline TBLPROPERTIES clause, so
-            # apply catalog-managed via a follow-up ALTER on the fresh table.
+            # Only the structural statements here.  catalogManaged is applied
+            # via a best-effort ALTER in _refresh_single_object (LIKE drops an
+            # inline TBLPROPERTIES clause), so an ALTER failure doesn't fail the
+            # whole object.
             return [
                 f"DROP TABLE IF EXISTS {target_fqn}",
                 f"CREATE TABLE {target_fqn} LIKE {source_fqn}",
-                set_catalog_managed_sql(target_fqn),
             ]
         return [f"TRUNCATE TABLE {target_fqn}"]
 
@@ -168,12 +169,29 @@ def _refresh_single_object(
     strategy = obj_row["clone_strategy"]
 
     try:
+        full_refresh = mode == "full"
         statements = _generate_object_sql(
             source_fqn, target_fqn, strategy, data_revision,
-            full_refresh=(mode == "full"),
+            full_refresh=full_refresh,
         )
         for sql in statements:
             db_client.sql_exec(sql)
+        # schema_only tables are re-created via CREATE TABLE ... LIKE, which
+        # drops an inline TBLPROPERTIES clause -- apply catalogManaged via a
+        # best-effort ALTER (never fails the object).  On a non-full refresh a
+        # schema_only object is only TRUNCATEd, so a table provisioned before
+        # catalogManaged shipped is NOT upgraded here -- flag it, don't hide it.
+        if strategy == "schema_only":
+            if full_refresh:
+                statements = [
+                    *statements,
+                    apply_catalog_managed_best_effort(db_client, target_fqn),
+                ]
+            else:
+                logger.info(
+                    "Incremental refresh of schema_only %s does not (re)apply "
+                    "catalogManaged; run a full refresh to upgrade it.", target_fqn,
+                )
         return ObjectRefreshResult(
             source_fqn=source_fqn,
             target_fqn=target_fqn,

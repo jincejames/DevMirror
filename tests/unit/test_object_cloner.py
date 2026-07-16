@@ -181,6 +181,9 @@ class TestExecuteClone:
         assert any(
             s.startswith("ALTER TABLE") and "catalogManaged" in s for s in executed
         )
+        # The attempted ALTER is recorded in the result SQL (visible in audit/UI),
+        # not just the logs.
+        assert "ALTER TABLE" in r.sql and "catalogManaged" in r.sql
 
     def test_schema_only_alter_failure_is_nonfatal(self) -> None:
         # A failure on the follow-up ALTER must not fail the clone itself.

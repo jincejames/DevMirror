@@ -14,8 +14,11 @@ from devmirror.refresh.refresh_engine import (
     RefreshError,
     _filter_objects,
     _generate_object_sql,
+    _refresh_single_object,
     refresh_dr,
 )
+
+from .conftest import make_mock_db
 
 # ------------------------------------------------------------------
 # Helpers
@@ -94,11 +97,11 @@ class TestGenerateObjectSql:
         ("shallow_clone", True),
         ("deep_clone", False),
         ("deep_clone", True),
-        ("schema_only", True),
     ])
     def test_recreated_tables_set_catalog_managed(self, strategy, full) -> None:
-        # Refresh re-creates tables via CREATE (OR REPLACE) TABLE; the
-        # catalog-managed feature must be re-applied or it is lost.
+        # SHALLOW/DEEP CLONE re-create tables via CREATE (OR REPLACE) TABLE and
+        # carry catalogManaged inline (schema_only applies it via a best-effort
+        # ALTER in _refresh_single_object, tested separately).
         joined = "; ".join(
             _generate_object_sql("a.b.c", "d.e.f", strategy, full_refresh=full)
         )
@@ -110,16 +113,40 @@ class TestGenerateObjectSql:
         stmts = _generate_object_sql("a.b.c", "d.e.f", "schema_only", full_refresh=False)
         assert stmts == ["TRUNCATE TABLE d.e.f"]
 
-    def test_schema_only_full_refresh_uses_like_plus_alter(self) -> None:
-        # CREATE TABLE ... LIKE drops an inline TBLPROPERTIES clause, so
-        # catalogManaged is applied via a follow-up ALTER, not inline.
+    def test_schema_only_full_refresh_is_structural_only(self) -> None:
+        # _generate_object_sql returns only DROP + CREATE LIKE; the
+        # catalogManaged ALTER is applied best-effort in _refresh_single_object
+        # (not returned here), so an ALTER failure can't fail the whole object.
         stmts = _generate_object_sql("a.b.c", "d.e.f", "schema_only", full_refresh=True)
         assert stmts == [
             "DROP TABLE IF EXISTS d.e.f",
             "CREATE TABLE d.e.f LIKE a.b.c",
-            "ALTER TABLE d.e.f SET TBLPROPERTIES "
-            "('delta.feature.catalogManaged' = 'supported')",
         ]
+
+
+class TestRefreshSingleObjectCatalogManaged:
+    def _row(self, strategy="schema_only"):
+        return {
+            "source_fqn": "a.b.c", "target_fqn": "d.e.f",
+            "target_environment": "dev", "clone_strategy": strategy,
+            "status": "PROVISIONED",
+        }
+
+    def test_schema_only_full_refresh_runs_alter(self) -> None:
+        db = make_mock_db()
+        r = _refresh_single_object(db, self._row(), None, "full")
+        assert r.success
+        executed = [c.args[0] for c in db.sql_exec.call_args_list]
+        assert any(s.startswith("ALTER TABLE") and "catalogManaged" in s for s in executed)
+        assert "catalogManaged" in r.sql
+
+    def test_schema_only_alter_failure_is_nonfatal(self) -> None:
+        # DROP + CREATE succeed; the follow-up ALTER raises -- the object must
+        # still be reported successful (best-effort), not FAILED.
+        db = make_mock_db()
+        db.sql_exec.side_effect = [None, None, Exception("alter denied")]
+        r = _refresh_single_object(db, self._row(), None, "full")
+        assert r.success
 
 
 # ------------------------------------------------------------------

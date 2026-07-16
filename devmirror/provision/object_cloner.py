@@ -20,13 +20,6 @@ _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z0-9_]+$")
 # feature only -- NOT valid on views, volumes, or UC schemas.
 _CATALOG_MANAGED_PROP = "'delta.feature.catalogManaged' = 'supported'"
 
-# Inline clause appended to the SHALLOW/DEEP CLONE builders. Verified against
-# the LH pre-prod workspace (both interactively and via the Statement Execution
-# API the app uses): `CREATE [OR REPLACE] TABLE ... CLONE ... TBLPROPERTIES(...)`
-# honors the clause and the resulting table is catalog-managed. NOTE:
-# `CREATE TABLE ... LIKE` does NOT -- it silently drops the clause -- so the
-# schema_only path applies the feature via a follow-up ALTER (see
-# set_catalog_managed_sql) instead of this inline form.
 CATALOG_MANAGED_TBLPROPERTIES = f" TBLPROPERTIES ({_CATALOG_MANAGED_PROP})"
 
 VALID_STRATEGIES = frozenset(
@@ -152,6 +145,24 @@ def set_catalog_managed_sql(target_fqn: str) -> str:
     return f"ALTER TABLE {target_fqn} SET TBLPROPERTIES ({_CATALOG_MANAGED_PROP})"
 
 
+def apply_catalog_managed_best_effort(db_client: DbClient, target_fqn: str) -> str:
+    """Mark a LIKE-created table catalog-managed; log and swallow on failure.
+
+    Shared by the provision (``execute_clone``) and refresh
+    (``_refresh_single_object``) paths so both behave identically: the ALTER
+    is best-effort and never fails the surrounding clone/refresh.  Returns the
+    ALTER SQL that was attempted so callers can record it.
+    """
+    sql = set_catalog_managed_sql(target_fqn)
+    try:
+        db_client.sql_exec(sql)
+    except Exception as exc:
+        logger.warning(
+            "catalogManaged ALTER failed on %s (non-fatal): %s", target_fqn, exc
+        )
+    return sql
+
+
 def create_volume_sql(target_fqn: str) -> str:
     """Generate SQL to create a managed Volume.
 
@@ -260,15 +271,10 @@ def execute_clone(
             provision_volume_subdirs(db_client, target_fqn)
         elif strategy == "schema_only":
             # `CREATE TABLE ... LIKE` drops an inline TBLPROPERTIES clause, so
-            # mark the fresh (non-clone) table catalog-managed via a follow-up
-            # ALTER.  Best-effort: a failure here does not fail the clone.
-            try:
-                db_client.sql_exec(set_catalog_managed_sql(target_fqn))
-            except Exception as exc:
-                logger.warning(
-                    "Failed to set catalogManaged on schema_only table %s: %s",
-                    target_fqn, exc,
-                )
+            # mark the fresh (non-clone) table catalog-managed via a best-effort
+            # follow-up ALTER.  Record the ALTER in the result SQL so a silent
+            # failure is still visible in audit/UI, not just the logs.
+            sql = f"{sql}; {apply_catalog_managed_best_effort(db_client, target_fqn)}"
         return CloneResult(
             source_fqn=source_fqn,
             target_fqn=target_fqn,

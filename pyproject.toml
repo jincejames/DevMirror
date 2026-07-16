@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "devmirror"
-version = "0.2.10"
+version = "0.2.11"
 description = "Automates cloning and lifecycle management of production Unity Catalog objects into isolated development environments."
 readme = "README.md"
 license = {text = "MIT"}

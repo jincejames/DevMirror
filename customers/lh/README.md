@@ -233,27 +233,29 @@ done
 The app SP `app-5hh30h devmirror` (`88ace2c4-a5cc-4583-b303-592549cd67f2`) is
 **not a workspace admin**. Databricks SCIM restricts `GET /Users/{id}` and
 `GET /Groups/{id}` to workspace admins, and `GET /Users?attributes=groups`
-silently strips the `groups` attribute for non-admin callers. Empirically
-confirmed against the LH workspace via a temporary `/api/debug/scim`
-endpoint: the app SP sees `{ groups: [] }` for any user, even when the
-user has 8 groups in their record.
+silently strips the `groups` attribute for non-admin callers, so the app SP's
+own credentials cannot read a user's group memberships.
 
-This breaks the original group-centric admin lookup AND the user-centric
-projection workaround. Mitigation deployed in code: the role resolver now
-runs **on-behalf-of-user** (OBO), using the caller's OAuth token from
+**Resolved: group-based admin works via OBO.** The role resolver runs
+**on-behalf-of-user** (OBO), using the caller's OAuth token from
 `X-Forwarded-Access-Token` to call SCIM `/Me` as the user themselves
-(self-introspection always works regardless of admin status). For OBO to
-fire, **`user_api_scopes` must be declared in `app/app.yaml`** (it is,
-post-fix). Additionally, the LH workspace must have OBO/`user_api_scopes`
-enabled at the platform level.
+(self-introspection always works regardless of admin status). This requires
+`user_api_scopes` in `app/app.yaml` (declared) AND the workspace to have
+OBO/`user_api_scopes` enabled at the platform level — **both are in place in
+LH pre-prod**. Confirmed 2026-07-29: `effective_user_api_scopes` is set on the
+app, and removing a user from `DEVMIRROR_ADMIN_EMAILS` while they remained in
+`lhg-odp-adw-support-admin` left them admin — i.e. the group path grants admin
+on its own. So **future admins can be added to `lhg-odp-adw-support-admin` with
+no redeploy.**
 
-**Manual fixes that resolve this gap if OBO is not available in the LH
-workspace** (rank-ordered, cheapest first):
+**Fallback if OBO ever stops working** (e.g. the workspace toggle is disabled),
+rank-ordered:
 
 1. **Make the app SP a workspace admin.** One SCIM patch — adds the SP
    (`147783910414063`) to the built-in `admins` group. Restores SCIM read
-   access. Trade-off: the SP gains `CAN_MANAGE` on every workspace
-   resource, so this is over-permissioned for what's needed.
+   access so the SP-credentials lookup path works without OBO. Trade-off: the
+   SP gains `CAN_MANAGE` on every workspace resource, so this is
+   over-permissioned for what's needed.
 
    ```bash
    ADMINS_ID=$(databricks groups list --profile lh-dev --filter "displayName eq 'admins'" --output json | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])")

@@ -34,12 +34,14 @@ env:
     value: lhg-odp-adw-support-admin
   # Static admin-emails list (comma-separated, case-insensitive).  Any
   # caller whose X-Forwarded-Email matches gets the admin role
-  # immediately, without SCIM.  Used as a workaround when the app SP
-  # cannot read SCIM (non-admin SP + account-level admin group + OBO
-  # disabled).  Members of DEVMIRROR_ADMIN_GROUP still get admin via
-  # the SCIM path when reachable; the two paths layer.
+  # immediately, without SCIM.  This is a SUPPLEMENT / break-glass path:
+  # members of DEVMIRROR_ADMIN_GROUP get admin via the OBO SCIM lookup
+  # (confirmed working in LH pre-prod -- OBO user_api_scopes is effective),
+  # so the group is the primary way to manage admins without a redeploy.
+  # Use this list for principals not in the group, or as a fallback.
+  # The two paths layer.
   - name: DEVMIRROR_ADMIN_EMAILS
-    value: jince.james.sp@dlh.de,artur.plath@lhsystems.com,andre.lauer@dlh.de,david.johnson.u118433.sp@lhsystems.com,brijesh.kumar@dlh.de,michal.kaszalowicz@lhsystems.com,mikita.kandratsiuk.sp@dlh.de,bulbul.parekh.sp@dlh.de,prashant.kathuria.sp@dlh.de
+    value: jince.james.sp@dlh.de,artur.plath@lhsystems.com,andre.lauer@dlh.de,david.johnson.u118433.sp@lhsystems.com,brijesh.kumar@dlh.de,mikita.kandratsiuk.sp@dlh.de,bulbul.parekh.sp@dlh.de,prashant.kathuria.sp@dlh.de,piotr.poraj-gorski@lhsystems.com
   # In LH the app SP cannot read SCIM for individual users (only for
   # members of its own groups).  Without this bypass, every developer
   # email gets filter-listed and returns 0 results, so apply_grants

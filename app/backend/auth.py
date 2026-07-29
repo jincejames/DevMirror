@@ -129,12 +129,13 @@ def _resolve_role(email: str, user_token: str = "") -> str:
             )
             return "user"
 
-        # Static admin-emails bypass.  Useful when SCIM-based group
-        # lookup is blocked -- e.g. the app SP is not a workspace admin
-        # AND the admin group is account-level (workspace SCIM strips
-        # `groups` for non-admin callers) AND OBO `user_api_scopes` is
-        # not enabled in the workspace.  When DEVMIRROR_ADMIN_EMAILS is
-        # set (comma-separated), any caller whose email matches (case-
+        # Static admin-emails supplement / break-glass path.  The OBO
+        # SCIM group lookup below is the primary route (confirmed working
+        # in LH pre-prod -- OBO `user_api_scopes` is effective, so members
+        # of the admin group are resolved via their own `/Me` groups).
+        # This list grants admin to principals not in the group, or serves
+        # as a fallback if OBO ever stops working.  When DEVMIRROR_ADMIN_EMAILS
+        # is set (comma-separated), any caller whose email matches (case-
         # insensitive) is granted admin without touching SCIM.  The
         # SCIM-based group lookup below still runs for callers NOT in
         # the static list, so the two paths layer naturally.

@@ -73,7 +73,7 @@ variables:
       the LH workspace where the app SP can't read SCIM and OBO
       user_api_scopes isn't enabled.  Adding/removing admins here
       requires a redeploy.
-    default: jince.james.sp@dlh.de,artur.plath@lhsystems.com,andre.lauer@dlh.de,david.johnson.u118433.sp@lhsystems.com,brijesh.kumar@dlh.de,michal.kaszalowicz@lhsystems.com,mikita.kandratsiuk.sp@dlh.de,bulbul.parekh.sp@dlh.de,prashant.kathuria.sp@dlh.de
+    default: jince.james.sp@dlh.de,artur.plath@lhsystems.com,andre.lauer@dlh.de,david.johnson.u118433.sp@lhsystems.com,brijesh.kumar@dlh.de,mikita.kandratsiuk.sp@dlh.de,bulbul.parekh.sp@dlh.de,prashant.kathuria.sp@dlh.de,piotr.poraj-gorski@lhsystems.com
 
   lineage_system_table:
     description: |

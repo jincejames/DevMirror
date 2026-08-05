@@ -525,14 +525,21 @@ def provision_dr(
     ]
 
     # Build the (env, schemas) pairs once so schema and volume grants share
-    # the same env iteration order.
-    env_schemas: list[tuple[str, list[str]]] = [
-        ("dev", _get_schemas_for_env(config, manifest, "dev")),
-    ]
+    # the same env iteration order.  Include the per-DR import schemas (same
+    # merge as `all_schemas` above) so USE_SCHEMA/SELECT(/MODIFY) is granted
+    # on them too -- otherwise the volume grants below land but principals
+    # can't traverse into the import schema to use the volume.  When the
+    # import feature is off, _get_import_schemas_for_env returns [] so this
+    # is a no-op.
+    def _env_schema_list(env: str) -> list[str]:
+        return sorted(set(
+            _get_schemas_for_env(config, manifest, env)
+            + _get_import_schemas_for_env(manifest, dr_id, env)
+        ))
+
+    env_schemas: list[tuple[str, list[str]]] = [("dev", _env_schema_list("dev"))]
     if "qa" in envs:
-        env_schemas.append(
-            ("qa", _get_schemas_for_env(config, manifest, "qa"))
-        )
+        env_schemas.append(("qa", _env_schema_list("qa")))
 
     for env_name, schemas in env_schemas:
         if not schemas:
@@ -551,9 +558,10 @@ def provision_dr(
             result.grants_failed.extend(uat_grant_result.failed)
 
     # Per-volume grants for the per-DR import-schema Volumes.  Schema-level
-    # USE_SCHEMA was already granted above as part of `apply_grants` on the
-    # import schemas; this just layers the volume-securable grants on top
-    # with the same RW/RO matrix.
+    # USE_SCHEMA on the import schemas was granted by the schema grant loop
+    # above (they're now included in env_schemas); this layers the
+    # volume-securable grants (READ_VOLUME/WRITE_VOLUME) on top with the same
+    # RW/RO matrix.
     for env_name, _ in env_schemas:
         env_volumes = [
             row["target_fqn"] for row in all_object_rows

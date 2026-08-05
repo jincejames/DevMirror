@@ -486,6 +486,81 @@ class TestProvisionDr:
         assert Privilege.WRITE_VOLUME not in vol_grants[(dev_vol, "uat@company.com")]
         assert Privilege.WRITE_VOLUME not in vol_grants[(qa_vol, "uat@company.com")]
 
+    def test_import_schemas_get_use_schema_grants(self, monkeypatch) -> None:
+        # Code-review finding #4: with the import feature on, the import
+        # schemas must receive USE_SCHEMA (+SELECT/MODIFY for devs, +SELECT for
+        # UAT) so principals can traverse into them to use the volume.
+        from databricks.sdk.service.catalog import Privilege, SecurableType
+
+        from devmirror.provision.access_manager import (
+            _principal_cache,
+            _principal_cache_lock,
+        )
+        with _principal_cache_lock:
+            _principal_cache.clear()
+
+        monkeypatch.setenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", "import_main")
+        monkeypatch.setenv("DEVMIRROR_IMPORT_VOLUME_NAME", "main_volume")
+
+        db = _mock_db()
+        found = MagicMock()
+        db.client.users.list.return_value = [found]
+        db.client.groups.list.return_value = [found]
+
+        (result, *_) = _provision(config=_cfg(qa=True), db=db)
+        assert result.final_status == "ACTIVE"
+
+        schema_grants: dict[tuple[str, str], set] = {}
+        for call in db.grant.call_args_list:
+            sec_type, fqn, principal, privs = call.args
+            if sec_type == SecurableType.SCHEMA:
+                schema_grants.setdefault((fqn, principal), set()).update(privs)
+
+        dev_import = "prod_analytics_n.dr_1042_import_main"
+        qa_import = "prod_analytics_i.qa_1042_import_main"
+        # Developer: USE_SCHEMA + SELECT + MODIFY on both import schemas.
+        for sch in (dev_import, qa_import):
+            assert schema_grants[(sch, "dev@company.com")] >= {
+                Privilege.USE_SCHEMA, Privilege.SELECT, Privilege.MODIFY,
+            }
+        # UAT user: USE_SCHEMA + SELECT, never MODIFY.
+        for sch in (dev_import, qa_import):
+            uat = schema_grants[(sch, "uat@company.com")]
+            assert Privilege.USE_SCHEMA in uat and Privilege.SELECT in uat
+            assert Privilege.MODIFY not in uat
+
+    def test_no_import_schema_grants_when_feature_off(self, monkeypatch) -> None:
+        # Regression guard: with the import feature off, only the regular
+        # clone-target schemas are granted (no import schemas), i.e. behavior
+        # is unchanged from before the fix.
+        from databricks.sdk.service.catalog import SecurableType
+
+        from devmirror.provision.access_manager import (
+            _principal_cache,
+            _principal_cache_lock,
+        )
+        with _principal_cache_lock:
+            _principal_cache.clear()
+
+        monkeypatch.delenv("DEVMIRROR_IMPORT_SCHEMA_SUFFIX", raising=False)
+        monkeypatch.delenv("DEVMIRROR_IMPORT_VOLUME_NAME", raising=False)
+
+        db = _mock_db()
+        found = MagicMock()
+        db.client.users.list.return_value = [found]
+        db.client.groups.list.return_value = [found]
+
+        (result, *_) = _provision(config=_cfg(qa=True), db=db)
+        assert result.final_status == "ACTIVE"
+
+        granted_schemas = {
+            call.args[1]
+            for call in db.grant.call_args_list
+            if call.args[0] == SecurableType.SCHEMA
+        }
+        assert granted_schemas  # some schemas were granted
+        assert not any("import_main" in s for s in granted_schemas)
+
     def test_empty_manifest(self) -> None:
         (result, *_) = _provision(manifest=_manifest(objects=[], schemas=[]))
         assert result.final_status == "ACTIVE"

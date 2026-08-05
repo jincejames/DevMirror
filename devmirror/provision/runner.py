@@ -386,6 +386,23 @@ def provision_dr(
             logger.debug("Failed to read v1 object rows for orphan drop", exc_info=True)
             old_rows = []
 
+        # Import schemas hold customer-sideloaded Volume data.  They must
+        # NEVER be auto-dropped on re-provision -- if the import feature was
+        # turned off or its suffix changed in v2, the v1 import schema would
+        # otherwise look like an orphan and get CASCADE-dropped, silently
+        # destroying uploaded data.  Identify them from v1's own rows:
+        # volumes are only ever created inside import schemas, so any schema
+        # containing a v1 volume row is an import schema.  This is robust even
+        # when DEVMIRROR_IMPORT_SCHEMA_SUFFIX is unset at re-provision time.
+        # These schemas (and their volumes) are still removed at DR expiry by
+        # the cleanup engine, which reads all object rows including volumes.
+        import_schemas_from_v1: set[str] = set()
+        for row in old_rows:
+            if row.get("object_type") == "volume":
+                parts = row.get("target_fqn", "").split(".")
+                if len(parts) >= 2:
+                    import_schemas_from_v1.add(f"{parts[0]}.{parts[1]}")
+
         new_target_fqns = {row["target_fqn"] for row in all_object_rows}
         old_schemas: set[str] = set()
         for row in old_rows:
@@ -397,6 +414,9 @@ def provision_dr(
                 old_schemas.add(f"{parts[0]}.{parts[1]}")
             if old_target in new_target_fqns:
                 # v2 re-creates this target -- CREATE OR REPLACE handles it.
+                continue
+            # Never drop objects living in an import schema (see above).
+            if len(parts) >= 2 and f"{parts[0]}.{parts[1]}" in import_schemas_from_v1:
                 continue
             try:
                 if row.get("object_type") == "volume":
@@ -418,9 +438,16 @@ def provision_dr(
 
         # Drop v1 schemas that v2 no longer references.  v2-recreated
         # schemas were already CREATE SCHEMA IF NOT EXISTS'd above and
-        # need to stay.
+        # need to stay.  Import schemas are preserved (see above).
         new_schemas_set = set(all_schemas)
         for old_schema in sorted(old_schemas - new_schemas_set):
+            if old_schema in import_schemas_from_v1:
+                logger.info(
+                    "Preserving v1 import schema %s on re-provision of %s "
+                    "(holds sideloaded data; cleanup engine drops it at expiry)",
+                    old_schema, dr_id,
+                )
+                continue
             parts = old_schema.split(".")
             if len(parts) != 2:
                 continue

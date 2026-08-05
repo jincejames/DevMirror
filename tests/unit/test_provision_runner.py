@@ -658,15 +658,52 @@ class TestProvisionDr:
         # The v1 orphan table must have been dropped via delete_table.
         delete_table_calls = [c.args[0] for c in db.delete_table.call_args_list]
         assert "prod_analytics_n.dr_1042_old.gone" in delete_table_calls
-        # The v1 volume orphan must have gone through DROP VOLUME SQL.
+        # The v1 volume lives in an import schema (dr_1042_import_main), so it
+        # is PRESERVED on re-provision (finding #5 -- avoid data loss); it is
+        # NOT dropped via DROP VOLUME here.  Cleanup at DR expiry removes it.
         sql_exec_calls = [c.args[0] for c in db.sql_exec.call_args_list]
-        assert any(
+        assert not any(
             "DROP VOLUME IF EXISTS prod_analytics_n.dr_1042_import_main.main_volume" in s
             for s in sql_exec_calls
         )
+        # The import schema itself must NOT be dropped.
+        delete_schema_calls = [(c.args[0], c.args[1]) for c in db.delete_schema.call_args_list]
+        assert ("prod_analytics_n", "dr_1042_import_main") not in delete_schema_calls
         # The v1 target that v2 still has must NOT have been pre-dropped --
         # CREATE OR REPLACE handles it during the clone pass.
         assert "prod_analytics_n.dr_1042_customers.profile" not in delete_table_calls
+
+    def test_reprovision_preserves_import_schema_drops_regular_orphan(self) -> None:
+        # Finding #5 (data loss): on re-provision with the import feature off
+        # in v2, a v1 import schema (holding a sideloaded volume) must be
+        # PRESERVED, while a genuinely-orphaned regular schema is still dropped.
+        dr, obj, acc, aud = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        dr.get.side_effect = [
+            {"dr_id": "DR-1042", "status": "ACTIVE"},
+            {"dr_id": "DR-1042", "status": "ACTIVE"},
+        ]
+        obj.list_by_dr_id.return_value = [
+            # regular orphan (v2 no longer references it) -> must be dropped
+            {"dr_id": "DR-1042", "target_fqn": "prod_analytics_n.dr_1042_orphan.gone",
+             "object_type": "table"},
+            # import schema (holds a volume) -> must be preserved
+            {"dr_id": "DR-1042", "target_fqn": "prod_analytics_n.dr_1042_import_main.main_volume",
+             "object_type": "volume"},
+        ]
+        db = _mock_db()
+        result = provision_dr(_cfg(), _manifest(),
+                              db_client=db, dr_repo=dr, obj_repo=obj,
+                              access_repo=acc, audit_repo=aud,
+                              force_replace=True)
+        assert result.final_status == "ACTIVE"
+
+        dropped_schemas = [(c.args[0], c.args[1]) for c in db.delete_schema.call_args_list]
+        # Regular orphan schema dropped.
+        assert ("prod_analytics_n", "dr_1042_orphan") in dropped_schemas
+        # Import schema preserved (never dropped) + its volume not DROP VOLUME'd.
+        assert ("prod_analytics_n", "dr_1042_import_main") not in dropped_schemas
+        sql_exec_calls = [c.args[0] for c in db.sql_exec.call_args_list]
+        assert not any("DROP VOLUME" in s and "dr_1042_import_main" in s for s in sql_exec_calls)
 
     def test_readback_mismatch_logs_critical(self, caplog) -> None:
         # Simulate the case where force_status "succeeds" (no exception) but

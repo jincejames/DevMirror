@@ -220,6 +220,18 @@ def provision_config(
             detail=f"Config {dr_id} is invalid. Fix validation errors before provisioning.",
         )
 
+    # Rejection is terminal (see reject_config): a rejected config keeps its
+    # manifest and a non-'invalid' status, so without this guard it could be
+    # provisioned despite having been explicitly turned down.
+    if row["status"] == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Config {dr_id} is rejected and cannot be provisioned. "
+                "Request a new DR with updated requirements."
+            ),
+        )
+
     manifest_raw = row.get("manifest_json")
     if not manifest_raw:
         raise HTTPException(

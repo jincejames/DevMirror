@@ -355,6 +355,23 @@ class TestProvisionConfig:
         resp = client.post("/api/configs/DR-9999/provision")
         assert resp.status_code == 404
 
+    def test_provision_rejected_config_409(self, client, mock_db):
+        """A rejected config is terminal and must not be provisionable
+        (code-review finding #3)."""
+        manifest = {"scan_result": {"dr_id": "DR-1042", "objects": []}}
+        mock_db.sql.return_value = [
+            make_db_row(status="rejected", manifest_json=json.dumps(manifest))
+        ]
+        resp = client.post("/api/configs/DR-1042/provision")
+        assert resp.status_code == 409
+        assert "rejected" in resp.json()["detail"].lower()
+
+    def test_provision_invalid_config_400(self, client, mock_db):
+        mock_db.sql.return_value = [make_db_row(status="invalid")]
+        resp = client.post("/api/configs/DR-1042/provision")
+        assert resp.status_code == 400
+        assert "invalid" in resp.json()["detail"].lower()
+
 
 # ---- Task status endpoint tests ----
 

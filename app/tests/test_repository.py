@@ -133,6 +133,7 @@ class TestReject:
         repo.reject(
             mock_db,
             dr_id="DR-100",
+            current_status="scanned",
             comment="Doesn't follow naming convention",
             rejected_by="admin@example.com",
             rejected_at="2026-05-22T10:00:00Z",
@@ -149,10 +150,27 @@ class TestReject:
         assert "WHERE dr_id = :dr_id" in sql
         assert params == {
             "dr_id": "DR-100",
+            "current_status": "scanned",
             "rejection_comment": "Doesn't follow naming convention",
             "rejected_by": "admin@example.com",
             "rejected_at": "2026-05-22T10:00:00Z",
         }
+
+    def test_reject_has_compare_and_set_status_guard(self, repo, mock_db):
+        """finding #6: the reject UPDATE must gate on the expected current
+        status so a concurrent state change can't be overwritten."""
+        repo.reject(
+            mock_db,
+            dr_id="DR-100",
+            current_status="valid",
+            comment="x",
+            rejected_by="admin@example.com",
+            rejected_at="2026-05-22T10:00:00Z",
+        )
+        sql = mock_db.sql_exec_with_params.call_args[0][0]
+        params = mock_db.sql_exec_with_params.call_args[0][1]
+        assert "AND status = :current_status" in sql
+        assert params["current_status"] == "valid"
 
 
 class TestDelete:

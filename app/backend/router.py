@@ -338,10 +338,26 @@ def reject_config(
     repo.reject(
         db_client,
         dr_id=dr_id,
+        current_status=current_status,
         comment=body.comment,
         rejected_by=current_user,
         rejected_at=now,
     )
+
+    # The reject UPDATE carries an `AND status = :current_status` compare-and-set
+    # guard, so a concurrent status change (e.g. a provision that landed between
+    # our read above and this write) makes it a no-op.  The Statement Execution
+    # API doesn't return affected-row counts, so re-read to detect that miss and
+    # surface a 409 rather than reporting a rejection that didn't happen.
+    reread = repo.get(db_client, dr_id=dr_id)
+    if reread is None or (reread.get("status") or "").lower() != "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Config {dr_id} changed status concurrently and was not "
+                "rejected. Reload and try again."
+            ),
+        )
 
     # Audit row -- mirrors the other admin actions so the rejection lands
     # in audit_log alongside the lifecycle events.  Audit failure must not

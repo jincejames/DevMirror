@@ -107,7 +107,12 @@ class TestRejectConfig:
     DR-level reject -- a config row is what the admin actually reviews."""
 
     def test_reject_scanned_config_succeeds(self, client, mock_db):
-        mock_db.sql.return_value = [make_db_row(status="scanned")]
+        # First get() reads 'scanned'; the post-reject re-read returns the
+        # 'rejected' row (models the CAS UPDATE landing).
+        mock_db.sql.side_effect = [
+            [make_db_row(status="scanned")],
+            [make_db_row(status="rejected")],
+        ]
         resp = client.post(
             "/api/configs/DR-1042/reject",
             json={"comment": "Naming convention off"},
@@ -117,24 +122,43 @@ class TestRejectConfig:
         assert body["dr_id"] == "DR-1042"
         assert body["status"] == "rejected"
         assert body["rejection_comment"] == "Naming convention off"
-        # The UPDATE SQL must have run with the rejection columns + status.
-        # mock_db captures every sql_exec_with_params call; we expect at
-        # least one with the rejection comment value.
-        any_reject_update = any(
-            "status = 'rejected'" in (call.args[0] if call.args else "")
+        # The UPDATE must set status='rejected' AND carry the CAS guard.
+        reject_updates = [
+            call.args[0]
             for call in mock_db.sql_exec_with_params.call_args_list
-        )
-        assert any_reject_update, "expected UPDATE setting status='rejected'"
+            if call.args and "status = 'rejected'" in call.args[0]
+        ]
+        assert reject_updates, "expected UPDATE setting status='rejected'"
+        assert any("AND status = :current_status" in s for s in reject_updates), \
+            "reject UPDATE must carry the compare-and-set status guard"
 
     def test_reject_valid_config_also_succeeds(self, client, mock_db):
         # `valid` is also an acceptable source status -- the admin might
         # reject before the user even runs Scan.
-        mock_db.sql.return_value = [make_db_row(status="valid")]
+        mock_db.sql.side_effect = [
+            [make_db_row(status="valid")],
+            [make_db_row(status="rejected")],
+        ]
         resp = client.post(
             "/api/configs/DR-1042/reject",
             json={"comment": "Out of scope for this team"},
         )
         assert resp.status_code == 200
+
+    def test_reject_concurrent_status_change_returns_409(self, client, mock_db):
+        # TOCTOU (finding #6): the row reads 'valid' at guard time, but a
+        # concurrent provision flips it before the reject UPDATE.  The CAS
+        # guard makes the UPDATE a no-op; the post-write re-read still shows
+        # 'provisioned' (not 'rejected'), so the endpoint returns 409.
+        mock_db.sql.side_effect = [
+            [make_db_row(status="valid")],        # initial guard read
+            [make_db_row(status="provisioned")],  # re-read after CAS no-op
+        ]
+        resp = client.post(
+            "/api/configs/DR-1042/reject", json={"comment": "race"},
+        )
+        assert resp.status_code == 409
+        assert "concurrent" in resp.json()["detail"].lower()
 
     def test_reject_provisioned_returns_409(self, client, mock_db):
         # Already-provisioned configs are out of scope -- the admin should

@@ -135,6 +135,7 @@ class ConfigRepository:
         db_client: DbClient,
         *,
         dr_id: str,
+        current_status: str,
         comment: str,
         rejected_by: str,
         rejected_at: str,
@@ -142,9 +143,13 @@ class ConfigRepository:
         """Mark a config row as REJECTED with the admin's comment.
 
         Writes status + the three rejection metadata columns in a single
-        UPDATE.  The endpoint (`POST /api/configs/{dr_id}/reject`) is
-        responsible for guarding the source status (only ``valid`` or
-        ``scanned`` are eligible) -- this method is a thin DB writer.
+        UPDATE.  The ``AND status = :current_status`` compare-and-set guard
+        closes a TOCTOU race: if another admin action (e.g. provision)
+        flipped the status between the endpoint's read and this write, the
+        UPDATE matches 0 rows and no-ops instead of stamping 'rejected' over
+        live infrastructure.  The endpoint re-reads the row afterwards and
+        surfaces a 409 on a CAS miss (the Statement Execution API does not
+        return affected-row counts).  Mirrors DRRepository.reject.
         """
         sql = (
             f"UPDATE {self._table} SET "
@@ -153,10 +158,12 @@ class ConfigRepository:
             "rejected_by = :rejected_by, "
             "rejected_at = :rejected_at, "
             "updated_at = :rejected_at "
-            "WHERE dr_id = :dr_id"
+            "WHERE dr_id = :dr_id "
+            "AND status = :current_status"
         )
         db_client.sql_exec_with_params(sql, {
             "dr_id": dr_id,
+            "current_status": current_status,
             "rejection_comment": comment,
             "rejected_by": rejected_by,
             "rejected_at": rejected_at,

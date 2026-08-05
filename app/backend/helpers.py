@@ -57,13 +57,16 @@ def _get_repo(settings: Settings, db_client: DbClient | None = None) -> ConfigRe
             logger.info(
                 "Control-plane DDL applied at %s", settings.control_fqn_prefix,
             )
+            # Only mark bootstrap done on success; a transient failure must
+            # leave the flag False so a later request retries the DDL instead
+            # of permanently skipping it for the life of the process.
+            _table_ensured = True
         except Exception:
             logger.warning(
                 "Could not bootstrap control-plane DDL at %s",
                 settings.control_fqn_prefix,
                 exc_info=True,
             )
-        _table_ensured = True
     return repo
 
 

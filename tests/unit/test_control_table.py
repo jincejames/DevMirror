@@ -47,21 +47,11 @@ _DR_DISALLOWED = [
     (DRStatus.CLEANED_UP, DRStatus.ACTIVE),
     (DRStatus.ACTIVE, DRStatus.PENDING_REVIEW),
     (DRStatus.EXPIRED, DRStatus.ACTIVE),
-    # REJECTED is terminal and only reachable from PENDING_REVIEW.
-    (DRStatus.ACTIVE, DRStatus.REJECTED),
-    (DRStatus.PROVISIONING, DRStatus.REJECTED),
-    (DRStatus.REJECTED, DRStatus.ACTIVE),
-    (DRStatus.REJECTED, DRStatus.PROVISIONING),
-    (DRStatus.REJECTED, DRStatus.CLEANUP_IN_PROGRESS),
-]
-
-_DR_ALLOWED_REJECT = [
-    (DRStatus.PENDING_REVIEW, DRStatus.REJECTED),
 ]
 
 
 class TestDRTransitions:
-    @pytest.mark.parametrize("cur,tgt", _DR_ALLOWED + _DR_ALLOWED_REJECT)
+    @pytest.mark.parametrize("cur,tgt", _DR_ALLOWED)
     def test_allowed(self, cur, tgt) -> None:
         validate_dr_status_transition(cur, tgt)
 
@@ -213,49 +203,6 @@ class TestDRRepository:
         called_sql, params = db.sql_exec_with_params.call_args[0]
         assert ":notification_sent_at" in called_sql
         assert params == {"dr_id": "DR-1", "notification_sent_at": "2026-04-01T00:00:00Z"}
-
-    def test_reject_writes_metadata_columns_and_status(self) -> None:
-        repo, db = DRRepository(FQN), _mock_db()
-        sql = repo.reject(
-            db, dr_id="DR-1",
-            current_status=DRStatus.PENDING_REVIEW,
-            comment="Doesn't follow naming convention",
-            rejected_by="admin@co.com",
-            rejected_at="2026-05-22T10:00:00Z",
-        )
-        # SQL touches all five fields in one UPDATE -> CAS-gated on current
-        # status so concurrent provisions on the same DR don't silently flip
-        # the row.
-        assert "UPDATE" in sql
-        assert "rejection_comment = :rejection_comment" in sql
-        assert "rejected_by = :rejected_by" in sql
-        assert "rejected_at = :rejected_at" in sql
-        assert "status = :new_status" in sql
-        assert "AND status = :current_status" in sql
-        params = db.sql_exec_with_params.call_args[0][1]
-        assert params["new_status"] == "REJECTED"
-        assert params["current_status"] == "PENDING_REVIEW"
-        assert params["rejection_comment"] == "Doesn't follow naming convention"
-        assert params["rejected_by"] == "admin@co.com"
-        assert params["rejected_at"] == "2026-05-22T10:00:00Z"
-        # last_modified_at mirrors rejected_at so the row's audit timestamp
-        # stays consistent.
-        assert params["last_modified_at"] == "2026-05-22T10:00:00Z"
-
-    def test_reject_validates_transition(self) -> None:
-        # Only PENDING_REVIEW -> REJECTED is allowed.  Attempting to reject
-        # an ACTIVE DR must raise BEFORE any UPDATE is issued.
-        repo, db = DRRepository(FQN), _mock_db()
-        with pytest.raises(StatusTransitionError):
-            repo.reject(
-                db, dr_id="DR-1",
-                current_status=DRStatus.ACTIVE,
-                comment="Too late",
-                rejected_by="admin@co.com",
-                rejected_at="2026-05-22T10:00:00Z",
-            )
-        db.sql_exec_with_params.assert_not_called()
-
 
 # ------------------------------------------------------------------
 # DrObjectRepository

@@ -20,6 +20,7 @@ from .helpers import (
     _build_yaml,
     _get_repo,
     _obj_repo,
+    _parse_config_in,
 )
 
 if TYPE_CHECKING:
@@ -146,8 +147,6 @@ def approve_edit(
     from devmirror.modify.modification_engine import _manage_users
     from devmirror.utils import now_iso
 
-    from .models import ConfigIn
-
     obj_repo = _obj_repo(settings)
     access_repo = _access_repo(settings)
     audit_repo = _audit_repo(settings)
@@ -202,8 +201,13 @@ def approve_edit(
     added_uat = sorted(new_uat - old_uat)
     removed_uat = sorted(old_uat - new_uat)
 
-    # Persist the new config row
-    config_in = ConfigIn.model_validate(new_dict)
+    # Persist the new config row.  Use _parse_config_in (same as the read
+    # path) rather than ConfigIn.model_validate: a legacy DR whose stored
+    # description is null/sub-5-char would otherwise fail the mandatory-
+    # description validator here and 500 the approval of an unrelated
+    # access-list edit.  _parse_config_in substitutes a placeholder before
+    # validating; the raw new_dict is still what gets persisted below.
+    config_in = _parse_config_in(proposed_json)
     repo.update(
         db_client,
         dr_id=dr_id,

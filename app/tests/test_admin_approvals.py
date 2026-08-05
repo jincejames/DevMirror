@@ -305,6 +305,49 @@ class TestApproveEdit:
         approved_detail = json.loads(approved_kwargs["action_detail"])
         assert approved_detail["pending_edit_id"] == pe_id
 
+    def test_approve_legacy_null_description_does_not_500(self, client, mock_db):
+        """A legacy DR whose stored/proposed description is null must not 500
+        the approval of an access-list edit. _parse_config_in substitutes a
+        placeholder before validation (code-review finding #2)."""
+        pe_id = "pe-approve-legacy"
+        # Proposed payload carries a null description (legacy row inherited it).
+        proposed_cfg = valid_config_payload(
+            dr_id="DR-1042", developers=["alice@co.com", "bob@co.com"]
+        )
+        proposed_cfg["description"] = None
+        proposed = json.dumps(proposed_cfg)
+        rows = {
+            "CONFIG_EDIT_PENDING": [
+                _pending_audit_row(pe_id, proposed_config_json=proposed),
+            ],
+            "CONFIG_EDIT_APPROVED": [],
+            "CONFIG_EDIT_REJECTED": [],
+        }
+        ctx, _dr, _obj, _access, mock_audit = _patch_admin_repos(rows)
+
+        # Existing config row also has a null (legacy) description.
+        cfg = valid_config_payload(dr_id="DR-1042", developers=["alice@co.com"])
+        cfg["description"] = None
+        existing = make_db_row(dr_id="DR-1042", status="provisioned")
+        existing["config_json"] = json.dumps(cfg)
+
+        fake_config_repo = MagicMock()
+        fake_config_repo.get.return_value = existing
+        fake_config_repo.update = MagicMock()
+
+        with ctx, \
+             patch("backend.router_admin._get_repo", return_value=fake_config_repo), \
+             patch("devmirror.modify.modification_engine._manage_users"):
+            resp = client.post(f"/api/admin/approvals/{pe_id}/approve")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "approved"
+        assert fake_config_repo.update.called
+        # The raw (null) description is still what gets persisted; only the
+        # in-memory ConfigIn used for YAML gets the placeholder.
+        update_kwargs = fake_config_repo.update.call_args.kwargs
+        assert update_kwargs["description"] is None
+
     def test_approve_pending_not_found(self, client, mock_db):
         """No matching pending edit -> 404."""
         ctx, *_ = _patch_admin_repos({
